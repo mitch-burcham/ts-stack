@@ -26,6 +26,15 @@ const AUTH_VERSION = '0.1'
 const INITIAL_RESPONSE_TIMEOUT_MS = 30_000
 const BufferCtor = typeof globalThis === 'undefined' ? undefined : (globalThis as any).Buffer
 
+function throwIfSendAborted(signal?: AbortSignal): void {
+  if (signal == null) return
+  if (typeof signal.throwIfAborted === 'function') {
+    signal.throwIfAborted()
+  } else if (signal.aborted) {
+    throw signal.reason ?? new Error('The operation was aborted.')
+  }
+}
+
 /**
  * Represents a peer capable of performing mutual authentication.
  * Manages sessions, handles authentication handshakes, certificate requests and responses,
@@ -169,7 +178,12 @@ export class Peer {
    * @returns {Promise<void>}
    * @throws Will throw an error if the message fails to send.
    */
-  async toPeer(message: number[], identityKey?: string): Promise<void> {
+  async toPeer(
+    message: number[],
+    identityKey?: string,
+    signal?: AbortSignal,
+    onDispatch?: () => void
+  ): Promise<void> {
     message = copyAuthByteArray(message, 'general.payload', MAX_AUTH_MESSAGE_BYTES, true)
     if (identityKey !== undefined) assertAuthPeerTarget(identityKey)
     if (
@@ -180,7 +194,8 @@ export class Peer {
       identityKey = this.lastInteractedWithPeer
     }
 
-    const peerSession = await this.getAuthenticatedSession(identityKey)
+    const peerSession = await this.getAuthenticatedSession(identityKey, signal)
+    throwIfSendAborted(signal)
 
     if (peerSession.peerIdentityKey == null) {
       throw new Error('Peer identity is not established')
@@ -201,11 +216,15 @@ export class Peer {
       this.#originator
     )
     const signature = copyAuthByteArray(signatureResult, 'general.signature', 1024)
+    throwIfSendAborted(signal)
+
+    const identityPublicKey = await this.#getIdentityPublicKey()
+    throwIfSendAborted(signal)
 
     const generalMessage: AuthMessage = {
       version: AUTH_VERSION,
       messageType: 'general',
-      identityKey: await this.#getIdentityPublicKey(),
+      identityKey: identityPublicKey,
       nonce: requestNonce,
       yourNonce: peerSession.peerNonce,
       payload: message,
@@ -215,7 +234,12 @@ export class Peer {
     await this.#touchSession(peerSession.sessionNonce as string)
 
     try {
-      await this.#transport.send(snapshotBoundedAuthData(generalMessage))
+      // The marker and send invocation are intentionally synchronous with the
+      // final abort check. Once marked, callers must treat the outcome as
+      // indeterminate even if cancellation wins the response race.
+      throwIfSendAborted(signal)
+      onDispatch?.()
+      await this.#transport.send(snapshotBoundedAuthData(generalMessage), signal)
     } catch (error: unknown) {
       this.propagateTransportError(peerSession.peerIdentityKey, error)
     }
@@ -484,7 +508,10 @@ export class Peer {
    * @param {string} [identityKey] - The identity public key of the peer.
    * @returns {Promise<PeerSession>} - A promise that resolves with an authenticated `PeerSession`.
    */
-  async getAuthenticatedSession(identityKey?: string): Promise<PeerSession> {
+  async getAuthenticatedSession(
+    identityKey?: string,
+    signal?: AbortSignal
+  ): Promise<PeerSession> {
     if (this.#transport === undefined) {
       throw new Error('Peer transport is not connected!')
     }
@@ -497,7 +524,8 @@ export class Peer {
     // If that session doesn't exist or isn't authenticated, initiate handshake
     if (peerSession?.isAuthenticated !== true) {
       // This will create a brand-new session
-      const sessionNonce = await this.initiateHandshake(identityKey)
+      const sessionNonce = await this.initiateHandshake(identityKey, signal)
+      throwIfSendAborted(signal)
       // Now retrieve it by the sessionNonce
       peerSession = await this.sessionManager.getSession(sessionNonce)
       if (peerSession?.isAuthenticated !== true) {
@@ -603,8 +631,12 @@ export class Peer {
    * @param {string} [identityKey] - The identity public key of the peer.
    * @returns {Promise<string>} A promise that resolves to the session nonce.
    */
-  private async initiateHandshake(identityKey?: string): Promise<string> {
+  private async initiateHandshake(
+    identityKey?: string,
+    signal?: AbortSignal
+  ): Promise<string> {
     const sessionNonce = await createNonce(this.#wallet, undefined, this.#originator)
+    throwIfSendAborted(signal)
 
     const certificatePolicy = this.#snapshotCertificatePolicy(this.certificatesToRequest)
     const now = Date.now()
@@ -619,11 +651,14 @@ export class Peer {
       certificatesRequired,
       certificatesValidated: !certificatesRequired
     })
+    throwIfSendAborted(signal)
+
+    const identityPublicKey = await this.#getIdentityPublicKey()
 
     const initialRequest: AuthMessage = {
       version: AUTH_VERSION,
       messageType: 'initialRequest',
-      identityKey: await this.#getIdentityPublicKey(),
+      identityKey: identityPublicKey,
       initialNonce: sessionNonce,
       requestedCertificates: this.#snapshotCertificatePolicy(certificatePolicy)
     }
@@ -636,7 +671,8 @@ export class Peer {
       this.#snapshotCertificatePolicy(certificatePolicy)
     )
     try {
-      await this.#transport.send(snapshotBoundedAuthData(initialRequest))
+      throwIfSendAborted(signal)
+      await this.#transport.send(snapshotBoundedAuthData(initialRequest), signal)
       return await initialResponse
     } catch (error) {
       this.stopListeningForInitialResponsesByNonce(sessionNonce)

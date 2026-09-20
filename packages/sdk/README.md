@@ -21,9 +21,16 @@ using the BRC-104 `-1` body-length sentinel. Conforming 204 and empty error
 responses now verify; non-empty response encoding is unchanged. Servers that
 sign a zero body length for an empty response must adopt the specified sentinel.
 
-AuthFetch stops pending certificate dispatch and session recovery after its
-request deadline. An already dispatched request may still complete on the
-server; callers must resolve its outcome before retrying a non-idempotent write.
+AuthFetch gives each authenticated request a private 30-second cancellation
+lifecycle. The deadline aborts handshake or request fetches and prevents the
+application request from being dispatched when pending certificate, session,
+or wallet work finishes late. It does not cancel an already displayed wallet
+approval prompt; the late result is ignored. The timeout message remains
+`Timed out waiting for authenticated response.` and its non-secret `details`
+contain the request ID plus `dispatchState: 'not-dispatched'` or
+`'possibly-dispatched'`. The latter means the server may still complete the
+request, so callers must resolve its outcome before retrying a non-idempotent
+write. AuthFetch does not automatically retry after the deadline.
 
 AuthFetch's automatic BRC-105 payment path delegates spending authorization to
 the configured wallet's `createAction` policy. Use a wallet that requires the

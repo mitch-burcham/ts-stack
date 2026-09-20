@@ -314,6 +314,52 @@ describe('AuthFetch pending-request boundary', () => {
     }
   })
 
+  test('ignores a response callback captured before the request timed out', async () => {
+    jest.useFakeTimers()
+    try {
+      let capturedListener:
+        | ((senderPublicKey: string, payload: number[]) => void)
+        | undefined
+      let sentPayload: number[] | undefined
+      const peerState = {
+        peer: {
+          listenForGeneralMessages: jest.fn(listener => {
+            capturedListener = listener
+            return 43
+          }),
+          stopListeningForGeneralMessages: jest.fn(),
+          toPeer: jest.fn(async (payload: number[]) => {
+            sentPayload = payload
+          })
+        },
+        identityKey: 'server-identity-key',
+        supportsMutualAuth: true,
+        pendingCertificateRequests: []
+      }
+      const authFetch = new AuthFetch({} as never)
+      ;(authFetch as any).peers['https://service.example'] = peerState
+
+      const request = authFetch.fetch('https://service.example/resource')
+      const rejection = expect(request).rejects.toThrow(
+        'Timed out waiting for authenticated response.'
+      )
+      await jest.advanceTimersByTimeAsync(30000)
+      await rejection
+
+      expect(() => {
+        capturedListener?.(
+          'late-server-identity-key',
+          buildResponsePayload(sentPayload?.slice(0, 32) ?? [], 200, {}, [])
+        )
+      }).not.toThrow()
+      expect(peerState.identityKey).toBe('server-identity-key')
+      expect(peerState.peer.toPeer).toHaveBeenCalledTimes(1)
+      expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   test('fails before allocating a listener when authenticated request capacity is exhausted', async () => {
     const listenForGeneralMessages = jest.fn()
     const authFetch = new AuthFetch({} as never)

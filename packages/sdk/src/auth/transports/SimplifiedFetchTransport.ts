@@ -101,20 +101,20 @@ export class SimplifiedFetchTransport implements Transport {
    *
    * @throws Will throw an error if no listener has been registered via `onData`.
    */
-  async send(message: AuthMessage): Promise<void> {
+  async send(message: AuthMessage, signal?: AbortSignal): Promise<void> {
     if (this.onDataCallback == null) {
       throw new Error(
         'Listen before you start speaking. God gave you two ears and one mouth for a reason.'
       )
     }
-    if (message.messageType !== 'general') return await this.#sendAuthMessage(message)
-    await this.#sendGeneralMessage(message)
+    if (message.messageType !== 'general') return await this.#sendAuthMessage(message, signal)
+    await this.#sendGeneralMessage(message, signal)
   }
 
   async #fetchAuthMessage(
     url: string,
     message: AuthMessage,
-    signal: AbortSignal
+    signal?: AbortSignal
   ): Promise<Response> {
     try {
       return await this.fetchClient(url, {
@@ -132,35 +132,39 @@ export class SimplifiedFetchTransport implements Transport {
     }
   }
 
-  async #sendAuthMessage(message: AuthMessage): Promise<void> {
+  async #sendAuthMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {
     return await new Promise((resolve, reject) => {
       void (async () => {
         try {
           const url = `${this.baseUrl}/.well-known/auth`
-          const responseWork = this.#withDeadline(url, async signal => {
-            const response = await this.#fetchAuthMessage(url, message, signal)
-            if (!response.ok) {
-              const body = await this.readResponseBody(
+          const responseWork = this.#withDeadline(
+            url,
+            async deadlineSignal => {
+              const response = await this.#fetchAuthMessage(url, message, deadlineSignal)
+              if (!response.ok) {
+                const body = await this.readResponseBody(
+                  url,
+                  response,
+                  this.#maxHandshakeResponseBytes,
+                  deadlineSignal
+                )
+                throw this.#createUnauthenticatedResponseError(url, response, body)
+              }
+              const responseBytes = await this.readResponseBody(
                 url,
                 response,
                 this.#maxHandshakeResponseBytes,
-                signal
+                deadlineSignal
               )
-              throw this.#createUnauthenticatedResponseError(url, response, body)
-            }
-            const responseBytes = await this.readResponseBody(
-              url,
-              response,
-              this.#maxHandshakeResponseBytes,
-              signal
-            )
-            await this.onDataCallback!(
-              normalizeBRC100ByteFields(JSON.parse(toUTF8(responseBytes)), [
-                'payload',
-                'signature'
-              ]) as AuthMessage
-            )
-          })
+              await this.onDataCallback!(
+                normalizeBRC100ByteFields(JSON.parse(toUTF8(responseBytes)), [
+                  'payload',
+                  'signature'
+                ]) as AuthMessage
+              )
+            },
+            signal
+          )
           if (message.messageType !== 'initialRequest') resolve()
           await responseWork
           if (message.messageType === 'initialRequest') resolve()
@@ -202,7 +206,11 @@ export class SimplifiedFetchTransport implements Transport {
     return request
   }
 
-  async #fetchGeneralResponse(url: string, request: any, signal: AbortSignal): Promise<Response> {
+  async #fetchGeneralResponse(
+    url: string,
+    request: any,
+    signal?: AbortSignal
+  ): Promise<Response> {
     try {
       return await this.fetchClient(url, {
         method: request.method,
@@ -355,15 +363,15 @@ export class SimplifiedFetchTransport implements Transport {
     return message
   }
 
-  async #sendGeneralMessage(message: AuthMessage): Promise<void> {
+  async #sendGeneralMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {
     const request = this.#prepareGeneralRequest(message)
     const url = `${this.baseUrl}${request.urlPostfix}`
-    await this.#withDeadline(url, async signal => {
-      const response = await this.#fetchGeneralResponse(url, request, signal)
-      const body = await this.readResponseBody(url, response, this.maxResponseBytes, signal)
+    await this.#withDeadline(url, async deadlineSignal => {
+      const response = await this.#fetchGeneralResponse(url, request, deadlineSignal)
+      const body = await this.readResponseBody(url, response, this.maxResponseBytes, deadlineSignal)
       this.#validateResponseAuthentication(url, response, body)
       await this.onDataCallback!(this.#createGeneralResponseMessage(url, response, body))
-    })
+    }, signal)
   }
 
   private async readResponseBody(
@@ -418,23 +426,38 @@ export class SimplifiedFetchTransport implements Transport {
     return Array.from(bytes)
   }
 
-  async #withDeadline<T>(url: string, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async #withDeadline<T>(
+    url: string,
+    work: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal
+  ): Promise<T> {
     const controller = new AbortController()
     let timeout: ReturnType<typeof setTimeout> | undefined
+    let removeAbortListener: (() => void) | undefined
+    const externalAbort = new Promise<never>((_resolve, reject) => {
+      if (signal == null) return
+      const onAbort = (): void => {
+        controller.abort(signal.reason)
+        reject(signal.reason ?? new Error('The operation was aborted.'))
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+      if (signal.aborted) onAbort()
+    })
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
-        controller.abort()
-        reject(
-          new Error(
-            `Authenticated request to ${url} timed out after ${this.#requestTimeoutMs} milliseconds`
-          )
+        const error = new Error(
+          `Authenticated request to ${url} timed out after ${this.#requestTimeoutMs} milliseconds`
         )
+        controller.abort(error)
+        reject(error)
       }, this.#requestTimeoutMs)
     })
     try {
-      return await Promise.race([work(controller.signal), deadline])
+      return await Promise.race([work(controller.signal), deadline, externalAbort])
     } finally {
       if (timeout !== undefined) clearTimeout(timeout)
+      removeAbortListener?.()
     }
   }
 

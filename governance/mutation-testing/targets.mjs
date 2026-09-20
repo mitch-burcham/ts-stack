@@ -148,7 +148,7 @@ export function buildMutationTargets(repositoryRoot) {
         ],
         [
           'src/auth/transports/SimplifiedFetchTransport.ts',
-          'async #sendAuthMessage(message: AuthMessage): Promise<void> {',
+          'async #sendAuthMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {',
           '#encodeRequestBody('
         ],
         [

@@ -86,6 +86,8 @@ interface RequestBodySummary {
   byteLength: number
 }
 
+type AuthFetchDispatchState = 'not-dispatched' | 'possibly-dispatched'
+
 const PAYMENT_VERSION = '1.0'
 const AUTH_RESPONSE_TIMEOUT_MS = 30000
 const MAX_PENDING_AUTH_REQUESTS = 1000
@@ -259,42 +261,46 @@ export class AuthFetch {
 
           let listenerId: number | undefined
           let responseTimeout: ReturnType<typeof setTimeout>
-          let cleaned = false
-          const cleanup = (): void => {
-            if (cleaned) return
-            cleaned = true
-            if (
-              listenerId !== undefined &&
-              typeof peerToUse.peer.stopListeningForGeneralMessages === 'function'
-            ) {
-              peerToUse.peer.stopListeningForGeneralMessages(listenerId)
+          const controller = new AbortController()
+          let dispatchState: AuthFetchDispatchState = 'not-dispatched'
+          let settled = false
+          const cleanup = (reason?: unknown): void => {
+            settled = true
+            if (listenerId != null) {
+              peerToUse.peer.stopListeningForGeneralMessages?.(listenerId)
             }
             clearTimeout(responseTimeout)
             this.pendingRequestNonces.delete(requestNonceAsBase64)
-          }
-          const resolveRequest = (response: Response): void => {
-            cleanup()
-            resolve(response)
-          }
-          const rejectRequest = (error: unknown): void => {
-            cleanup()
-            reject(error)
+            controller.abort(reason)
           }
 
           this.pendingRequestNonces.add(requestNonceAsBase64)
           listenerId = peerToUse.peer.listenForGeneralMessages(
             (senderPublicKey: string, payload: number[]) => {
+              // A transport may already have captured this callback when the
+              // listener is removed. Ignore any response that arrives after
+              // the owning request has settled.
+              if (settled) return
               const responseValue = this.parseAuthenticatedResponse(
                 baseURL,
                 requestNonceAsBase64,
                 senderPublicKey,
                 payload
               )
-              if (responseValue !== undefined) resolveRequest(responseValue)
+              if (responseValue != null) {
+                cleanup()
+                resolve(responseValue)
+              }
             }
           )
           responseTimeout = setTimeout(() => {
-            rejectRequest(new Error('Timed out waiting for authenticated response.'))
+            const timeoutError = new Error('Timed out waiting for authenticated response.')
+            ;(timeoutError as any).details = {
+              requestId: requestNonceAsBase64,
+              dispatchState
+            }
+            cleanup(timeoutError)
+            reject(timeoutError)
           }, AUTH_RESPONSE_TIMEOUT_MS)
 
           // Before sending general messages to the peer, ensure that no certificate requests are pending.
@@ -303,24 +309,27 @@ export class AuthFetch {
           // this makes sure the user has a chance to send the certificates before the resource is requested.
           try {
             if (peerToUse.pendingCertificateRequests.length > 0) {
-              await this.waitForPendingCertificateRequests(peerToUse)
+              await this.waitForPendingCertificateRequests(peerToUse, controller.signal)
             }
 
-            // A certificate prompt can outlive the request deadline. Never
-            // dispatch a request after its caller has already seen a timeout.
-            if (cleaned) return
-            await peerToUse.peer.toPeer(writer.toArray(), peerToUse.identityKey)
+            if (settled) return
+            await peerToUse.peer.toPeer(
+              writer.toArray(),
+              peerToUse.identityKey,
+              controller.signal,
+              () => {
+                dispatchState = 'possibly-dispatched'
+              }
+            )
           } catch (error) {
             // Late transport/session failures must not start recovery that
             // replays a request after its response deadline has expired.
-            if (cleaned) return
-            cleanup()
+            if (settled) return
+            cleanup(error)
             try {
-              resolveRequest(
-                await this.recoverAuthenticatedSend(error, baseURL, url, config, peerToUse)
-              )
+              resolve(await this.recoverAuthenticatedSend(error, baseURL, url, config, peerToUse))
             } catch (recoveryError) {
-              rejectRequest(recoveryError)
+              reject(recoveryError)
             }
           }
         } catch (error) {
@@ -1050,15 +1059,18 @@ export class AuthFetch {
     return { type: typeof body, byteLength: 0 }
   }
 
-  private async waitForPendingCertificateRequests(peer: AuthPeer): Promise<void> {
+  private async waitForPendingCertificateRequests(
+    peer: AuthPeer,
+    signal?: AbortSignal
+  ): Promise<void> {
     const timeoutMs = 30000
     const checkIntervalMs = 100
-    const startedAt = Date.now()
+    const deadline = Date.now() + timeoutMs
     while (peer.pendingCertificateRequests.length > 0) {
-      if (Date.now() - startedAt > timeoutMs) {
+      if (Date.now() > deadline) {
         throw new Error('Timeout waiting for certificate request to complete')
       }
-      await this.wait(checkIntervalMs)
+      await this.wait(checkIntervalMs, signal)
     }
   }
 
@@ -1124,11 +1136,22 @@ export class AuthFetch {
     return baseDelay * multiplier
   }
 
-  private async wait(ms: number): Promise<void> {
+  private async wait(ms: number, signal?: AbortSignal): Promise<void> {
     if (ms <= 0) {
       return
     }
-    await new Promise(resolve => setTimeout(resolve, ms))
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (signal) signal.onabort = null
+        resolve()
+      }, ms)
+      if (signal) {
+        signal.onabort = () => {
+          clearTimeout(timer)
+          reject()
+        }
+      }
+    })
   }
 
   private buildPaymentFailureError(

@@ -29,6 +29,20 @@ const getVerifiableCertificatesMock = getVerifiableCertificates as jest.MockedFu
   typeof getVerifiableCertificates
 >
 
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function buildResponsePayload(
   requestNonce: number[],
   status: number,
@@ -55,6 +69,7 @@ function buildResponsePayload(
 }
 
 afterEach(() => {
+  jest.useRealTimers()
   jest.restoreAllMocks()
   PeerMock.mockReset()
   SimplifiedFetchTransportMock.mockReset()
@@ -235,8 +250,123 @@ describe('AuthFetch authenticated peer lifecycle', () => {
     await expect(authFetch.fetch('https://service.example/resource')).rejects.toThrow(
       'stop after certificate wait'
     )
-    expect(waitForPending).toHaveBeenCalledWith((authFetch as any).peers['https://service.example'])
+    expect(waitForPending).toHaveBeenCalledWith(
+      (authFetch as any).peers['https://service.example'],
+      expect.any(AbortSignal)
+    )
     expect(peer.toPeer).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not send after late certificate approval and the 500 ms queue-release delay', async () => {
+    jest.useFakeTimers()
+    let certificatesRequested:
+      | ((verifier: string, requestedCertificates: Record<string, unknown>) => Promise<void>)
+      | undefined
+    const peer = {
+      ready: Promise.resolve(),
+      listenForCertificatesReceived: jest.fn(),
+      listenForCertificatesRequested: jest.fn((listener: typeof certificatesRequested) => {
+        certificatesRequested = listener
+      }),
+      listenForGeneralMessages: jest.fn(() => 51),
+      stopListeningForGeneralMessages: jest.fn(),
+      sendCertificateResponse: jest.fn(),
+      toPeer: jest.fn()
+    }
+    PeerMock.mockImplementation(() => peer)
+    const permission = deferred<any[]>()
+    getVerifiableCertificatesMock.mockReturnValue(permission.promise as any)
+    const authFetch = new AuthFetch({} as any)
+    const peerState = await (authFetch as any).getOrCreatePeer('https://service.example')
+    const requestedCertificates = { certifiers: ['certifier'], types: { identity: ['name'] } }
+
+    const certificateWork = certificatesRequested?.(
+      'server-identity-key',
+      requestedCertificates
+    ) as Promise<void>
+    expect(peerState.pendingCertificateRequests).toEqual([true])
+
+    const rejection = authFetch
+      .fetch('https://service.example/resource', { method: 'POST' })
+      .catch(error => error)
+    await jest.advanceTimersByTimeAsync(100)
+    expect(peer.toPeer).not.toHaveBeenCalled()
+    expect(jest.getTimerCount()).toBe(2)
+
+    await jest.advanceTimersByTimeAsync(29900)
+    await expect(rejection).resolves.toMatchObject({
+      message: 'Timed out waiting for authenticated response.'
+    })
+    expect(peer.toPeer).not.toHaveBeenCalled()
+    expect(jest.getTimerCount()).toBe(0)
+
+    permission.resolve([])
+    await jest.advanceTimersByTimeAsync(0)
+    expect(peerState.pendingCertificateRequests).toEqual([true])
+    expect(jest.getTimerCount()).toBe(1)
+
+    await jest.advanceTimersByTimeAsync(499)
+    expect(peerState.pendingCertificateRequests).toEqual([true])
+    expect(peer.toPeer).not.toHaveBeenCalled()
+
+    await jest.advanceTimersByTimeAsync(1)
+    await certificateWork
+    expect(peerState.pendingCertificateRequests).toEqual([])
+    expect(peer.toPeer).not.toHaveBeenCalled()
+    expect(jest.getTimerCount()).toBe(0)
+  })
+
+  test('releases the queue after late certificate denial without a resource send or timer leak', async () => {
+    jest.useFakeTimers()
+    let certificatesRequested:
+      | ((verifier: string, requestedCertificates: Record<string, unknown>) => Promise<void>)
+      | undefined
+    const peer = {
+      ready: Promise.resolve(),
+      listenForCertificatesReceived: jest.fn(),
+      listenForCertificatesRequested: jest.fn((listener: typeof certificatesRequested) => {
+        certificatesRequested = listener
+      }),
+      listenForGeneralMessages: jest.fn(() => 52),
+      stopListeningForGeneralMessages: jest.fn(),
+      sendCertificateResponse: jest.fn(),
+      toPeer: jest.fn()
+    }
+    PeerMock.mockImplementation(() => peer)
+    const permission = deferred<any[]>()
+    getVerifiableCertificatesMock.mockReturnValue(permission.promise as any)
+    const authFetch = new AuthFetch({} as any)
+    const peerState = await (authFetch as any).getOrCreatePeer('https://service.example')
+    const requestedCertificates = { certifiers: ['certifier'], types: { identity: ['name'] } }
+
+    const certificateWork = certificatesRequested?.(
+      'server-identity-key',
+      requestedCertificates
+    ) as Promise<void>
+    const denial = new Error('certificate permission denied')
+    const denied = expect(certificateWork).rejects.toBe(denial)
+    const rejection = authFetch
+      .fetch('https://service.example/resource', { method: 'POST' })
+      .catch(error => error)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    await expect(rejection).resolves.toMatchObject({
+      message: 'Timed out waiting for authenticated response.'
+    })
+    expect(peer.toPeer).not.toHaveBeenCalled()
+    expect(jest.getTimerCount()).toBe(0)
+
+    permission.reject(denial)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(peerState.pendingCertificateRequests).toEqual([true])
+    expect(jest.getTimerCount()).toBe(1)
+
+    await jest.advanceTimersByTimeAsync(500)
+    await denied
+    expect(peerState.pendingCertificateRequests).toEqual([])
+    expect(peer.toPeer).not.toHaveBeenCalled()
+    expect(peer.sendCertificateResponse).not.toHaveBeenCalled()
+    expect(jest.getTimerCount()).toBe(0)
   })
 
   test('retries stale sessions and resolves the recursive response', async () => {
