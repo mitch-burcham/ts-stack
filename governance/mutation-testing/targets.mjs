@@ -123,12 +123,12 @@ export function buildMutationTargets(repositoryRoot) {
         ],
         [
           'src/auth/clients/AuthFetch.ts',
-          'if (this.pendingRequestNonces.size >= MAX_PENDING_AUTH_REQUESTS)',
-          'responseTimeout = setTimeout('
+          'const startDeadlineTimer = (): boolean => {',
+          'void (async () => {'
         ],
         [
           'src/auth/clients/AuthFetch.ts',
-          'responseTimeout = setTimeout(',
+          'if (this.pendingRequestNonces.size >= MAX_PENDING_AUTH_REQUESTS)',
           'Before sending general messages to the peer'
         ],
         [
@@ -169,6 +169,7 @@ export function buildMutationTargets(repositoryRoot) {
         [
           '<rootDir>/src/auth/__tests/Peer.boundary.test.ts',
           '<rootDir>/src/auth/clients/__tests__/AuthFetch.boundary.test.ts',
+          '<rootDir>/src/auth/clients/__tests__/AuthFetch.deadline.test.ts',
           '<rootDir>/src/auth/clients/__tests__/AuthFetch.property.test.ts',
           '<rootDir>/src/auth/transports/__tests__/SimplifiedFetchTransport*.test.ts'
         ],

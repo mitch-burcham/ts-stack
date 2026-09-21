@@ -25,8 +25,13 @@ AuthFetch gives each authenticated request a private 30-second cancellation
 lifecycle. The deadline prevents application dispatch when pending
 certificate, session, or wallet work finishes late. The maintained
 `SimplifiedFetchTransport` also forwards the optional abort signal to handshake
-and application fetches. It does not cancel an already displayed wallet
-approval prompt; the late result is ignored. Custom `Transport`
+and application fetches. Stale-session recovery and authenticated-to-plain
+fallback keep the original absolute deadline; they do not receive a fresh
+30-second window, and plain fallback I/O is aborted when that budget expires.
+The built-in AuthFetch certificate listener also receives the signal, so a late
+wallet result cannot dispatch certificate disclosure. Custom certificate-request
+listeners should honor their optional third signal argument. AuthFetch does not cancel an
+already displayed wallet approval prompt; the late result is ignored. Custom `Transport`
 implementations must check the optional signal before any delayed side-effect
 dispatch and forward it to cancellation-aware I/O. A transport that ignores
 the signal after `send` begins may still dispatch after the AuthFetch promise

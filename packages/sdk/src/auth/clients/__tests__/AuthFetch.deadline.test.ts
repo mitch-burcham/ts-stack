@@ -453,6 +453,82 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
   })
 
+  test('late initial certificate approval cannot dispatch after handshake timeout', async () => {
+    jest.useFakeTimers()
+    const approval = deferred<any>()
+    const approvalStarted = deferred<void>()
+    const initialSend = deferred<void>()
+    const requestedCertificates = {
+      certifiers: [serverIdentityKey],
+      types: { testType: ['name'] }
+    }
+    const wallet = makeWallet() as any
+    wallet.listCertificates = jest.fn(() => {
+      approvalStarted.resolve(undefined)
+      return approval.promise
+    })
+    wallet.proveCertificate = jest.fn(async () => ({
+      keyringForVerifier: { name: 'revealed-key' }
+    }))
+    const transportSend = jest
+      .spyOn(SimplifiedFetchTransport.prototype, 'send')
+      .mockImplementation(async function (
+        this: SimplifiedFetchTransport,
+        message: AuthMessage
+      ): Promise<void> {
+        if (message.messageType !== 'initialRequest') {
+          throw new Error(`unexpected ${message.messageType} send`)
+        }
+        await (this as any).onDataCallback({
+          version: '0.1',
+          messageType: 'initialResponse',
+          identityKey: serverIdentityKey,
+          initialNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+          yourNonce: message.initialNonce,
+          requestedCertificates,
+          signature: [1, 2, 3]
+        })
+        await initialSend.promise
+      })
+    const authFetch = new AuthFetch(wallet)
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await approvalStarted.promise
+    const peerState = authFetch.peers[baseUrl]
+    const peer = peerState.peer
+    expect(peerState.pendingCertificateRequests).toEqual([true])
+    expect((peer as any).initialResponseTasks.size).toBe(0)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+    expect((peer as any).initialResponseTasks.size).toBe(0)
+    expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
+    expect((peer as any).initialResponseSignals.size).toBe(0)
+
+    approval.resolve({
+      certificates: [{
+        type: 'testType',
+        serialNumber: 'serial',
+        subject: clientIdentityKey,
+        certifier: serverIdentityKey,
+        revocationOutpoint: 'outpoint',
+        fields: { name: 'value' },
+        signature: [1, 2, 3]
+      }]
+    })
+    await jest.advanceTimersByTimeAsync(0)
+    expect(wallet.proveCertificate).toHaveBeenCalledTimes(1)
+    expect(transportSend).toHaveBeenCalledTimes(1)
+    expect(peerState.pendingCertificateRequests).toEqual([])
+    expect((peer as any).initialResponseTasks.size).toBe(0)
+    expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
+    expect((peer as any).initialResponseSignals.size).toBe(0)
+    expect(jest.getTimerCount()).toBe(0)
+
+    initialSend.reject(new Error('late initial send failure'))
+    await jest.advanceTimersByTimeAsync(0)
+  })
+
   test('cancels the pending-certificate poll timer without dispatching', async () => {
     jest.useFakeTimers()
     const fetchClient = jest.fn<typeof fetch>()
@@ -516,6 +592,101 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect(recursiveFetch).toHaveBeenCalledTimes(1)
     expect(fetchClient).toHaveBeenCalledTimes(1)
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
+  test('stale-session recovery cannot outlive the original deadline', async () => {
+    jest.useFakeTimers()
+    const staleFailure = deferred<void>()
+    const recoveredPeer = deferred<any>()
+    const staleError = new Error('Session not found for nonce: stale')
+    const firstToPeer = jest.fn(async () => {
+      await staleFailure.promise
+      throw staleError
+    })
+    const retryToPeer = jest.fn(async () => {})
+    const firstPeer = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 1),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: firstToPeer
+      },
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    const retryPeer = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 2),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: retryToPeer
+      },
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    const authFetch = new AuthFetch(makeWallet())
+    const getOrCreatePeer = jest
+      .spyOn(authFetch as any, 'getOrCreatePeer')
+      .mockResolvedValueOnce(firstPeer)
+      .mockImplementationOnce(async () => await recoveredPeer.promise)
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(29999)
+    staleFailure.resolve(undefined)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(getOrCreatePeer).toHaveBeenCalledTimes(2)
+    expect(retryToPeer).not.toHaveBeenCalled()
+
+    await jest.advanceTimersByTimeAsync(1)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+
+    recoveredPeer.resolve(retryPeer)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(retryToPeer).not.toHaveBeenCalled()
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
+  test('unauthenticated fallback is bounded by the original deadline', async () => {
+    jest.useFakeTimers()
+    const authenticationFailure = deferred<void>()
+    const fallbackResult = deferred<Response>()
+    let fallbackSignal: AbortSignal | undefined
+    const fallback = jest.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      fallbackSignal = init?.signal ?? undefined
+      // Deliberately ignore cancellation to prove the SDK deadline still settles.
+      return fallbackResult.promise
+    })
+    const peerState = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 1),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: jest.fn(async () => {
+          await authenticationFailure.promise
+          throw new Error('HTTP server failed to authenticate')
+        })
+      },
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    const authFetch = new AuthFetch(makeWallet())
+    jest.spyOn(authFetch as any, 'getOrCreatePeer').mockResolvedValue(peerState)
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(29999)
+    authenticationFailure.resolve(undefined)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(fallback).toHaveBeenCalledTimes(1)
+    expect(fallbackSignal?.aborted).toBe(false)
+
+    await jest.advanceTimersByTimeAsync(1)
+    expectSafeTimeout(await rejection, 'possibly-dispatched')
+    expect(fallbackSignal?.aborted).toBe(true)
+    expect(fallback).toHaveBeenCalledTimes(1)
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+
+    fallbackResult.reject(new Error('late fallback failure'))
+    await jest.advanceTimersByTimeAsync(0)
   })
 
   test('classifies a cancellation-ignoring custom transport as possibly dispatched', async () => {
@@ -629,6 +800,45 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     await expect(authFetch.fetch(`${baseUrl}/write`, { method: 'POST' })).rejects.toBe(denial)
     expect(fetchClient).not.toHaveBeenCalled()
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
+  test('legacy AbortSignal shapes work without throwIfAborted', async () => {
+    const transport: Transport = {
+      send: jest.fn(async () => {}),
+      async onData(): Promise<void> {}
+    }
+    const sessionManager = new SessionManager()
+    sessionManager.addSession({
+      isAuthenticated: true,
+      sessionNonce,
+      peerNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+      peerIdentityKey: serverIdentityKey,
+      lastUpdate: Date.now()
+    })
+    const peer = new Peer(makeWallet(), transport, undefined, sessionManager)
+    await peer.ready
+    const activeSignal = {
+      aborted: false,
+      reason: undefined,
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn()
+    } as unknown as AbortSignal
+
+    await expect(
+      peer.toPeer([1, 2, 3], serverIdentityKey, activeSignal)
+    ).resolves.toBeUndefined()
+
+    const abortError = new Error('legacy signal aborted')
+    const abortedSignal = {
+      aborted: true,
+      reason: abortError,
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn()
+    } as unknown as AbortSignal
+    await expect(
+      peer.toPeer([1, 2, 3], serverIdentityKey, abortedSignal)
+    ).rejects.toBe(abortError)
+    expect(transport.send).toHaveBeenCalledTimes(1)
   })
 
   test('legacy Transport and Peer.toPeer calls remain compatible', async () => {

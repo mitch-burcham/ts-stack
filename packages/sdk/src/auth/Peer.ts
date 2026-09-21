@@ -78,7 +78,8 @@ export class Peer {
     number,
     (
       senderPublicKey: string,
-      requestedCertificates: RequestedCertificateSet
+      requestedCertificates: RequestedCertificateSet,
+      signal?: AbortSignal
     ) => void | Promise<void>
   > = new Map()
 
@@ -95,6 +96,7 @@ export class Peer {
 
   private readonly initialResponseTasks: Map<string, Set<Promise<void>>> = new Map()
   private readonly cancelledInitialResponseSessions: Set<string> = new Set()
+  private readonly initialResponseSignals: Map<string, AbortSignal> = new Map()
 
   // Promise-based mechanism for waiting on certificate validation
   private readonly certificateValidationPromises: Map<
@@ -606,13 +608,14 @@ export class Peer {
    * keys are encrypted to the claimed identity; later signed protocol messages
    * establish whether the requester controls that key.
    *
-   * @param {(senderPublicKey: string, requestedCertificates: RequestedCertificateSet) => void | Promise<void>} callback - The function to call when a certificate request is received.
+   * @param {(senderPublicKey: string, requestedCertificates: RequestedCertificateSet, signal?: AbortSignal) => void | Promise<void>} callback - The function to call when a certificate request is received
    * @returns {number} The ID of the callback listener.
    */
   listenForCertificatesRequested(
     callback: (
       senderPublicKey: string,
-      requestedCertificates: RequestedCertificateSet
+      requestedCertificates: RequestedCertificateSet,
+      signal?: AbortSignal
     ) => void | Promise<void>
   ): number {
     const callbackID = this.#callbackIdCounter++
@@ -675,6 +678,7 @@ export class Peer {
       sessionNonce,
       this.#snapshotCertificatePolicy(certificatePolicy)
     )
+    if (signal != null) this.initialResponseSignals.set(sessionNonce, signal)
     try {
       const send = Promise.resolve().then(async () => {
         throwIfSendAborted(signal)
@@ -722,6 +726,7 @@ export class Peer {
         }
       } finally {
         this.cancelledInitialResponseSessions.delete(sessionNonce)
+        this.initialResponseSignals.delete(sessionNonce)
       }
       throw error
     } finally {
@@ -1131,7 +1136,11 @@ export class Peer {
     })
   }
 
-  async #answerInitialCertificateRequest(message: AuthMessage): Promise<void> {
+  async #answerInitialCertificateRequest(
+    message: AuthMessage,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const { requestedCertificates, identityKey } = message
     if (
       message.requestedCertificates == null ||
       !Array.isArray(message.requestedCertificates.certifiers) ||
@@ -1139,12 +1148,18 @@ export class Peer {
     ) {
       return
     }
+    throwIfSendAborted(signal)
     if (this.onCertificateRequestReceivedCallbacks.size > 0) {
       for (const callback of this.onCertificateRequestReceivedCallbacks.values()) {
-        await callback(
-          message.identityKey,
-          message.requestedCertificates as RequestedCertificateSet
-        )
+        if (signal == null) {
+          await callback(identityKey, requestedCertificates as RequestedCertificateSet)
+        } else {
+          await callback(
+            identityKey,
+            requestedCertificates as RequestedCertificateSet,
+            signal
+          )
+        }
       }
       return
     }
@@ -1154,10 +1169,11 @@ export class Peer {
       message.identityKey,
       this.#originator
     )
+    throwIfSendAborted(signal)
     // An empty response has no value and can race with a subsequent request
     // that shares the same initial nonce.
     if (verifiableCertificates.length > 0) {
-      await this.sendCertificateResponse(message.identityKey, verifiableCertificates)
+      await this.sendCertificateResponse(identityKey, verifiableCertificates, signal)
     }
   }
 
@@ -1170,7 +1186,8 @@ export class Peer {
       throw new Error('Initial response received for a cancelled session.')
     }
 
-    const task = this.#processUntrackedInitialResponse(message)
+    const signal = this.initialResponseSignals.get(sessionNonce)
+    const task = this.#processInitialResponseAuthentication(message)
     let tasks = this.initialResponseTasks.get(sessionNonce)
     if (tasks == null) {
       tasks = new Set()
@@ -1178,19 +1195,30 @@ export class Peer {
     }
     tasks.add(task)
     try {
-      await task
+      try {
+        await task
+      } finally {
+        tasks.delete(task)
+        if (tasks.size === 0) {
+          this.initialResponseTasks.delete(sessionNonce)
+        }
+      }
+      await this.#answerInitialCertificateRequest(message, signal)
     } finally {
-      tasks.delete(task)
-      if (tasks.size === 0) this.initialResponseTasks.delete(sessionNonce)
+      this.initialResponseSignals.delete(sessionNonce)
     }
   }
 
   async #processUntrackedInitialResponse(message: AuthMessage): Promise<void> {
+    await this.#processInitialResponseAuthentication(message)
+    await this.#answerInitialCertificateRequest(message)
+  }
+
+  async #processInitialResponseAuthentication(message: AuthMessage): Promise<void> {
     const { peerSession, zeroFieldPolicy } = await this.authenticateInitialResponse(message)
     await this.validateInitialResponseCertificates(message, peerSession, zeroFieldPolicy)
     this.lastInteractedWithPeer = message.identityKey
     this.#releaseInitialResponseWaiters(peerSession)
-    await this.#answerInitialCertificateRequest(message)
   }
 
   /**
@@ -1281,18 +1309,21 @@ export class Peer {
    *
    * @param {string} verifierIdentityKey - The identity key of the peer requesting the certificates.
    * @param {VerifiableCertificate[]} certificates - The list of certificates to include in the response.
+   * @param {AbortSignal} [signal] - Optional cancellation signal checked before transport dispatch.
    * @throws Will throw an error if the transport fails to send the message.
    */
   async sendCertificateResponse(
     verifierIdentityKey: string,
-    certificates: VerifiableCertificate[]
+    certificates: VerifiableCertificate[],
+    signal?: AbortSignal
   ): Promise<void> {
     assertAuthIdentityKey(verifierIdentityKey)
     if (!Array.isArray(certificates) || certificates.length > 100) {
       throw new TypeError('certificates must be an array of at most 100 entries')
     }
     certificates = snapshotBoundedAuthData(certificates)
-    const peerSession = await this.getAuthenticatedSession(verifierIdentityKey)
+    const peerSession = await this.getAuthenticatedSession(verifierIdentityKey, signal)
+    throwIfSendAborted(signal)
     const requestNonce = toBase64(Random(32))
     const { signature: signatureResult } = await this.#wallet.createSignature(
       {
@@ -1304,11 +1335,15 @@ export class Peer {
       this.#originator
     )
     const signature = copyAuthByteArray(signatureResult, 'certificateResponse.signature', 1024)
+    throwIfSendAborted(signal)
+
+    const identityPublicKey = await this.#getIdentityPublicKey()
+    throwIfSendAborted(signal)
 
     const certificateResponse: AuthMessage = {
       version: AUTH_VERSION,
       messageType: 'certificateResponse',
-      identityKey: await this.#getIdentityPublicKey(),
+      identityKey: identityPublicKey,
       nonce: requestNonce,
       initialNonce: peerSession.sessionNonce,
       yourNonce: peerSession.peerNonce,
@@ -1318,9 +1353,10 @@ export class Peer {
 
     // Update usage
     await this.#touchSession(peerSession.sessionNonce as string)
+    throwIfSendAborted(signal)
 
     try {
-      await this.#transport.send(snapshotBoundedAuthData(certificateResponse))
+      await this.#transport.send(snapshotBoundedAuthData(certificateResponse), signal)
     } catch (error: unknown) {
       this.propagateTransportError(peerSession.peerIdentityKey, error)
     }

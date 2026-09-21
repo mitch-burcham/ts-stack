@@ -383,11 +383,13 @@ describe('AuthFetch authenticated peer lifecycle', () => {
       pendingCertificateRequests: []
     }
 
-    const originalFetch = authFetch.fetch.bind(authFetch)
+    const originalFetchWithinDeadline = (authFetch as any).fetchWithinDeadline.bind(authFetch)
     const recoveredResponse = new Response('recovered', { status: 200 })
-    const fetchSpy = jest.spyOn(authFetch, 'fetch')
+    const fetchSpy = jest.spyOn(authFetch as any, 'fetchWithinDeadline')
     fetchSpy
-      .mockImplementationOnce((url, config) => originalFetch(url, config))
+      .mockImplementationOnce((url, config, deadline) =>
+        originalFetchWithinDeadline(url, config, deadline)
+      )
       .mockResolvedValueOnce(recoveredResponse)
 
     await expect(
@@ -415,11 +417,13 @@ describe('AuthFetch authenticated peer lifecycle', () => {
       pendingCertificateRequests: []
     }
 
-    const originalFetch = authFetch.fetch.bind(authFetch)
+    const originalFetchWithinDeadline = (authFetch as any).fetchWithinDeadline.bind(authFetch)
     const recoveredResponse = new Response('recovered', { status: 200 })
-    const fetchSpy = jest.spyOn(authFetch, 'fetch')
+    const fetchSpy = jest.spyOn(authFetch as any, 'fetchWithinDeadline')
     fetchSpy
-      .mockImplementationOnce((url, config) => originalFetch(url, config))
+      .mockImplementationOnce((url, config, deadline) =>
+        originalFetchWithinDeadline(url, config, deadline)
+      )
       .mockResolvedValueOnce(recoveredResponse)
 
     await expect(authFetch.fetch('https://service.example/resource')).resolves.toBe(

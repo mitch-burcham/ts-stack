@@ -318,7 +318,11 @@ All notable changes to this project will be documented in this file. The format 
   request ID and conservative `not-dispatched` or `possibly-dispatched` details.
   Wallet prompts are not cancelled; late results are ignored. Preserve immediate
   gateway and wallet-denial errors and never automatically replay a write after
-  its deadline. Coordinate cancellation with in-progress initial-response work
+  its deadline. Keep stale-session retry and authenticated-to-plain fallback on
+  the original absolute deadline, abort fallback I/O when it expires, and carry
+  cancellation through initial-response certificate selection so late wallet
+  approval cannot dispatch disclosure. Coordinate cancellation with in-progress
+  initial-response work
   and atomically clean up an aborted unauthenticated handshake when the session
   manager supports paired conditional authentication and removal, without
   deleting one that completed authentication or allowing a stale cross-replica
@@ -326,8 +330,8 @@ All notable changes to this project will be documented in this file. The format 
   pair; legacy or partially upgraded stores retain cancelled rows for normal TTL
   rather than risk a racy delete.
   The exact packed browser
-  graph measures 745,578 Vite / 562,797 esbuild / 557,845 UMD raw bytes. The
-  reviewed raw ceilings are 746,000 / 564,000 / 558,500 bytes; compression
+  graph measures 748,462 Vite / 564,695 esbuild / 559,748 UMD raw bytes. The
+  reviewed raw ceilings are 749,000 / 566,000 / 560,500 bytes; compression
   ceilings remain unchanged.
 
 ### Added

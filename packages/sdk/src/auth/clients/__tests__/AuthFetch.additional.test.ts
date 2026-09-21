@@ -81,19 +81,23 @@ describe('AuthFetch.fetch – retryCounter', () => {
   })
 
   it('decrements retryCounter before making the request', async () => {
-    // Verify that the stale-session retry path calls fetch() again, which means
-    // retryCounter gets decremented. We intercept the recursive fetch() call using
-    // a spy so a real Peer is never constructed inside the unit-test environment.
+    // Verify that the stale-session retry path re-enters the deadline-preserving
+    // implementation, which decrements retryCounter. Intercept that private retry
+    // so a real Peer is never constructed inside the unit-test environment.
     const authFetch = new AuthFetch(buildWallet())
 
     let fetchCallCount = 0
 
-    const originalFetch = authFetch.fetch.bind(authFetch)
-    jest.spyOn(authFetch, 'fetch').mockImplementation(async (url, config) => {
+    const originalFetchWithinDeadline = (authFetch as any).fetchWithinDeadline.bind(authFetch)
+    jest.spyOn(authFetch as any, 'fetchWithinDeadline').mockImplementation(async (
+      url: string,
+      config: any,
+      deadline?: number
+    ) => {
       fetchCallCount++
       if (fetchCallCount === 1) {
         // First call: run the real code path so the stale-session branch triggers
-        return originalFetch(url, config)
+        return originalFetchWithinDeadline(url, config, deadline)
       }
       // Subsequent calls (recursive retry after stale-session): throw to prove
       // the retry occurred with a decremented retryCounter.

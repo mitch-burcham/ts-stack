@@ -536,11 +536,13 @@ describe('AuthFetch pending-request boundary', () => {
       supportsMutualAuth: true,
       pendingCertificateRequests: []
     }
-    const originalFetch = authFetch.fetch.bind(authFetch)
+    const originalFetchWithinDeadline = (authFetch as any).fetchWithinDeadline.bind(authFetch)
     const recursiveResponse = new Response('retried', { status: 200 })
     const fetchSpy = jest
-      .spyOn(authFetch, 'fetch')
-      .mockImplementationOnce(originalFetch)
+      .spyOn(authFetch as any, 'fetchWithinDeadline')
+      .mockImplementationOnce((url, retryConfig, deadline) =>
+        originalFetchWithinDeadline(url, retryConfig, deadline)
+      )
       .mockResolvedValueOnce(recursiveResponse)
     const config: any = {}
 
@@ -579,7 +581,8 @@ describe('AuthFetch pending-request boundary', () => {
     expect(validate).toHaveBeenCalledWith(
       'https://service.example/resource',
       expect.any(Object),
-      peerState
+      peerState,
+      expect.any(AbortSignal)
     )
     expect(stopListeningForGeneralMessages).toHaveBeenCalledWith(47)
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)

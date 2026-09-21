@@ -226,13 +226,63 @@ export class AuthFetch {
    * @throws Will throw an error if unsupported headers are used or other validation fails.
    */
   async fetch(url: string, config: SimplifiedFetchRequestOptions = {}): Promise<Response> {
+    return await this.fetchWithinDeadline(url, config)
+  }
+
+  private async fetchWithinDeadline(
+    url: string,
+    config: SimplifiedFetchRequestOptions,
+    deadline?: number,
+    priorDispatchState: AuthFetchDispatchState = 'not-dispatched'
+  ): Promise<Response> {
     if (typeof config.retryCounter === 'number') {
       if (config.retryCounter <= 0) {
         throw new Error('Request failed after maximum number of retries.')
       }
       config.retryCounter--
     }
+    const requestNonce = Random(32)
+    const requestNonceAsBase64 = toBase64(requestNonce)
     const response = await new Promise<Response>((resolve, reject) => {
+      let peerToUse: AuthPeer | undefined
+      let listenerId: number | undefined
+      let dispatchState: AuthFetchDispatchState = priorDispatchState
+      let settled = false
+      const controller = new AbortController()
+      let responseTimeout: ReturnType<typeof setTimeout> | undefined
+      const cleanup = (reason?: unknown): void => {
+        settled = true
+        if (listenerId != null) {
+          peerToUse?.peer.stopListeningForGeneralMessages?.(listenerId)
+        }
+        if (responseTimeout != null) clearTimeout(responseTimeout)
+        this.pendingRequestNonces.delete(requestNonceAsBase64)
+        controller.abort(reason)
+      }
+      const startDeadlineTimer = (): boolean => {
+        const remaining = (deadline as number) - Date.now()
+        if (remaining <= 0) {
+          const error = this.createTimeoutError(requestNonceAsBase64, dispatchState)
+          cleanup(error)
+          reject(error)
+          return false
+        }
+        responseTimeout = setTimeout(() => {
+          const error = this.createTimeoutError(requestNonceAsBase64, dispatchState)
+          cleanup(error)
+          reject(error)
+        }, remaining)
+        return true
+      }
+      const expireIfDeadlineReached = (): boolean => {
+        if (deadline == null || Date.now() < deadline) return false
+        const error = this.createTimeoutError(requestNonceAsBase64, dispatchState)
+        cleanup(error)
+        reject(error)
+        return true
+      }
+      if (deadline != null && !startDeadlineTimer()) return
+
       void (async () => {
         try {
           // Apply defaults
@@ -242,36 +292,38 @@ export class AuthFetch {
           const parsedUrl = new URL(url)
           const baseURL = parsedUrl.origin
 
-          const peerToUse = await this.#getOrCreatePeer(baseURL)
+          peerToUse = await this.#getOrCreatePeer(baseURL)
+          if (settled || expireIfDeadlineReached()) return
           if (peerToUse.supportsMutualAuth === false) {
-            resolve(await this.handleFetchAndValidate(url, config, peerToUse))
+            if (deadline == null) {
+              resolve(await this.handleFetchAndValidate(url, config, peerToUse))
+              return
+            }
+            dispatchState = 'possibly-dispatched'
+            const fallback = await this.handleFetchAndValidate(
+              url,
+              config,
+              peerToUse,
+              controller.signal
+            )
+            if (settled) return
+            cleanup()
+            resolve(fallback)
             return
           }
 
           // Serialize the simplified fetch request.
-          const requestNonce = Random(32)
-          const requestNonceAsBase64 = toBase64(requestNonce)
-
           const writer = await this.serializeRequest(method, headers, body, parsedUrl, requestNonce)
+          if (settled || expireIfDeadlineReached()) return
 
           // Setup general message listener to resolve requests once a response is received
           if (this.pendingRequestNonces.size >= MAX_PENDING_AUTH_REQUESTS) {
             throw new Error('Authentication request capacity exceeded.')
           }
-
-          let listenerId: number | undefined
-          let responseTimeout: ReturnType<typeof setTimeout>
-          const controller = new AbortController()
-          let dispatchState: AuthFetchDispatchState = 'not-dispatched'
-          let settled = false
-          const cleanup = (reason?: unknown): void => {
-            settled = true
-            if (listenerId != null) {
-              peerToUse.peer.stopListeningForGeneralMessages?.(listenerId)
-            }
-            clearTimeout(responseTimeout)
-            this.pendingRequestNonces.delete(requestNonceAsBase64)
-            controller.abort(reason)
+          let startInitialDeadline = false
+          if (deadline == null) {
+            deadline = Date.now() + AUTH_RESPONSE_TIMEOUT_MS
+            startInitialDeadline = true
           }
 
           this.pendingRequestNonces.add(requestNonceAsBase64)
@@ -293,16 +345,7 @@ export class AuthFetch {
               }
             }
           )
-          responseTimeout = setTimeout(() => {
-            const timeoutError = new Error('Timed out waiting for authenticated response.')
-            ;(timeoutError as any).details = {
-              requestId: requestNonceAsBase64,
-              dispatchState
-            }
-            cleanup(timeoutError)
-            reject(timeoutError)
-          }, AUTH_RESPONSE_TIMEOUT_MS)
-
+          if (startInitialDeadline && !startDeadlineTimer()) return
           // Before sending general messages to the peer, ensure that no certificate requests are pending.
           // This way, the user would need to choose to either allow or reject the certificate request first.
           // If the server has a resource that requires certificates to be sent before access would be granted,
@@ -312,7 +355,7 @@ export class AuthFetch {
               await this.waitForPendingCertificateRequests(peerToUse, controller.signal)
             }
 
-            if (settled) return
+            if (settled || expireIfDeadlineReached()) return
             await peerToUse.peer.toPeer(
               writer.toArray(),
               peerToUse.identityKey,
@@ -327,12 +370,26 @@ export class AuthFetch {
             if (settled) return
             cleanup(error)
             try {
-              resolve(await this.recoverAuthenticatedSend(error, baseURL, url, config, peerToUse))
+              resolve(await this.recoverAuthenticatedSend(
+                error,
+                baseURL,
+                url,
+                config,
+                peerToUse,
+                deadline as number,
+                requestNonceAsBase64,
+                dispatchState,
+                () => {
+                  dispatchState = 'possibly-dispatched'
+                }
+              ))
             } catch (recoveryError) {
               reject(recoveryError)
             }
           }
         } catch (error) {
+          if (settled) return
+          cleanup(error)
           reject(error)
         }
       })()
@@ -371,8 +428,10 @@ export class AuthFetch {
     )
     newPeer.listenForCertificatesRequested((async (
       verifier: string,
-      requestedCertificates: RequestedCertificateSet
+      requestedCertificates: RequestedCertificateSet,
+      signal?: AbortSignal
     ) => {
+      if (signal?.aborted === true) return
       try {
         peerState.pendingCertificateRequests.push(true)
         const certificatesToInclude = await getVerifiableCertificates(
@@ -381,12 +440,21 @@ export class AuthFetch {
           verifier,
           this.originator
         )
+        if (signal?.aborted === true) return
         if (certificatesToInclude.length > 0) {
-          await newPeer.sendCertificateResponse(verifier, certificatesToInclude)
+          if (signal == null) {
+            await newPeer.sendCertificateResponse(verifier, certificatesToInclude)
+          } else {
+            await newPeer.sendCertificateResponse(verifier, certificatesToInclude, signal)
+          }
         }
       } finally {
         // Give the backend 500 ms to process the certificates we just sent, before releasing the queue entry.
-        await this.wait(500)
+        try {
+          await this.wait(500, signal)
+        } catch {
+          // Cancellation skips the post-send delay but still releases the queue.
+        }
         peerState.pendingCertificateRequests.shift()
       }
     }) as Function)
@@ -408,17 +476,57 @@ export class AuthFetch {
     baseURL: string,
     url: string,
     config: SimplifiedFetchRequestOptions,
-    peerToUse: AuthPeer
+    peerToUse: AuthPeer,
+    deadline: number,
+    requestId: string,
+    dispatchState: AuthFetchDispatchState,
+    onDispatch: () => void
   ): Promise<Response> {
     if (this.isStaleSessionError(error, peerToUse)) {
+      if (Date.now() >= deadline) {
+        throw this.createTimeoutError(requestId, dispatchState)
+      }
       delete this.peers[baseURL]
       config.retryCounter ??= 3
-      return await this.fetch(url, config)
+      return await this.fetchWithinDeadline(url, config, deadline, dispatchState)
     }
     if (error instanceof Error && error.message.includes('HTTP server failed to authenticate')) {
-      return await this.handleFetchAndValidate(url, config, peerToUse)
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw this.createTimeoutError(requestId, dispatchState)
+      const controller = new AbortController()
+      onDispatch()
+      const timeoutError = this.createTimeoutError(requestId, 'possibly-dispatched')
+      let timer: ReturnType<typeof setTimeout>
+      const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort(timeoutError)
+          reject(timeoutError)
+        }, remaining)
+      })
+      try {
+        return await Promise.race([
+          this.handleFetchAndValidate(url, config, peerToUse, controller.signal),
+          timeout
+        ])
+      } catch (fallbackError) {
+        if (fallbackError === timeoutError || controller.signal.reason === timeoutError) {
+          throw timeoutError
+        }
+        throw fallbackError
+      } finally {
+        clearTimeout(timer!)
+      }
     }
     throw error
+  }
+
+  private createTimeoutError(
+    requestId: string,
+    dispatchState: AuthFetchDispatchState
+  ): Error {
+    const error = new Error('Timed out waiting for authenticated response.')
+    ;(error as any).details = { requestId, dispatchState }
+    return error
   }
 
   private parseAuthenticatedResponse(
@@ -676,7 +784,8 @@ export class AuthFetch {
   private async handleFetchAndValidate(
     url: string,
     config: RequestInit,
-    peerToUse: AuthPeer
+    peerToUse: AuthPeer,
+    signal?: AbortSignal
   ): Promise<Response> {
     const response = await (this.fetchClient ?? fetch)(url, {
       method: config.method,
@@ -684,8 +793,12 @@ export class AuthFetch {
       body: config.body,
       // Do not allow a fallback request to replay a caller's body,
       // authorization header, or x-bsv metadata to a redirect destination.
-      redirect: 'error'
+      redirect: 'error',
+      signal
     })
+    if (signal?.aborted === true) {
+      throw signal.reason ?? new Error('The operation was aborted.')
+    }
     response.headers.forEach((_value, name) => {
       if (name.toLocaleLowerCase().startsWith('x-bsv')) {
         throw new Error('The server is trying to claim it has been authenticated when it has not!')
@@ -1140,17 +1253,19 @@ export class AuthFetch {
     if (ms <= 0) {
       return
     }
+    if (signal?.aborted === true) throw signal.reason
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (signal) signal.onabort = null
+        signal?.removeEventListener('abort', onAbort)
         resolve()
       }, ms)
-      if (signal) {
-        signal.onabort = () => {
-          clearTimeout(timer)
-          reject()
-        }
+      const onAbort = (): void => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        reject(signal?.reason)
       }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted === true) onAbort()
     })
   }
 
