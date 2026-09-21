@@ -180,6 +180,32 @@ describe('SessionManager', () => {
     })
   })
 
+  describe('updateSessionIfUnauthenticated', () => {
+    it('updates only an existing unauthenticated session', () => {
+      sessionManager.addSession(validSession)
+      const authenticatedSession = {
+        ...validSession,
+        isAuthenticated: true
+      }
+
+      expect(
+        sessionManager.updateSessionIfUnauthenticated(authenticatedSession)
+      ).toBe(true)
+      expect(sessionManager.getSession('testSessionNonce')).toBe(
+        authenticatedSession
+      )
+      expect(
+        sessionManager.updateSessionIfUnauthenticated(validSession)
+      ).toBe(false)
+      expect(
+        sessionManager.updateSessionIfUnauthenticated({
+          ...validSession,
+          sessionNonce: 'missing'
+        })
+      ).toBe(false)
+    })
+  })
+
   describe('hasSession', () => {
     it('should return true if a session exists for the identifier', () => {
       sessionManager.addSession(validSession)

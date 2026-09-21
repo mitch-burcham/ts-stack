@@ -46,20 +46,29 @@ class AsyncTestSessionManager implements AsyncSessionManager {
 
   async addSession(session: PeerSession): Promise<void> {
     await Promise.resolve()
-    this.sessions.set(session.sessionNonce as string, session)
+    this.sessions.set(session.sessionNonce as string, { ...session })
   }
 
   async updateSession(session: PeerSession): Promise<void> {
     await Promise.resolve()
-    this.sessions.set(session.sessionNonce as string, session)
+    this.sessions.set(session.sessionNonce as string, { ...session })
+  }
+
+  async updateSessionIfUnauthenticated(session: PeerSession): Promise<boolean> {
+    await Promise.resolve()
+    const current = this.sessions.get(session.sessionNonce as string)
+    if (current?.isAuthenticated !== false) return false
+    this.sessions.set(session.sessionNonce as string, { ...session })
+    return true
   }
 
   async getSession(identifier: string): Promise<PeerSession | undefined> {
     await Promise.resolve()
-    return (
+    const session = (
       this.sessions.get(identifier) ??
       [...this.sessions.values()].find(session => session.peerIdentityKey === identifier)
     )
+    return session == null ? undefined : { ...session }
   }
 
   async removeSession(session: PeerSession): Promise<void> {
@@ -231,6 +240,66 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     await jest.advanceTimersByTimeAsync(0)
   })
 
+  test('initial handshake timeout wins after a valid response while send remains pending', async () => {
+    jest.useFakeTimers()
+    const sendGate = deferred<void>()
+    const responseHandled = deferred<void>()
+    let handshakeSignal: AbortSignal | undefined
+    let onData: ((message: AuthMessage) => Promise<void>) | undefined
+    const send = jest.fn(async (message: AuthMessage, signal?: AbortSignal) => {
+      if (message.messageType !== 'initialRequest') throw new Error('unexpected general send')
+      handshakeSignal = signal
+      await onData?.({
+        version: '0.1',
+        messageType: 'initialResponse',
+        identityKey: serverIdentityKey,
+        initialNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+        yourNonce: message.initialNonce,
+        signature: [1, 2, 3]
+      })
+      responseHandled.resolve(undefined)
+      await sendGate.promise
+    })
+    const transport: Transport = {
+      async onData(callback): Promise<void> {
+        onData = callback
+      },
+      send
+    }
+    const wallet = makeWallet()
+    const sessionManager = new AsyncTestSessionManager()
+    const peer = new Peer(wallet, transport, undefined, sessionManager)
+    await peer.ready
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await responseHandled.promise
+    expect([...sessionManager.sessions.values()]).toEqual([
+      expect.objectContaining({ isAuthenticated: true })
+    ])
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+    await jest.advanceTimersByTimeAsync(0)
+
+    expect(handshakeSignal?.aborted).toBe(true)
+    expect([...sessionManager.sessions.values()]).toEqual([
+      expect.objectContaining({ isAuthenticated: true })
+    ])
+    expect((peer as any).initialResponseTasks.size).toBe(0)
+    expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
+    expect(send).toHaveBeenCalledTimes(1)
+
+    sendGate.reject(new Error('late custom transport failure'))
+    await jest.advanceTimersByTimeAsync(0)
+  })
+
   test('handshake cleanup awaits concurrent authentication and preserves its session', async () => {
     const failure = new Error('transport failed after authentication completed')
     const sessionManager = new AsyncTestSessionManager()
@@ -276,6 +345,71 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
     expect((peer as any).initialResponseTasks.size).toBe(0)
     expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
+  })
+
+  test('paired atomic transitions prevent cross-replica session resurrection', async () => {
+    const sessionManager = new AsyncTestSessionManager()
+    const sendGate = deferred<void>()
+    const initialRequestSent = deferred<void>()
+    const verification = deferred<{ valid: boolean }>()
+    const verificationStarted = deferred<void>()
+    let sessionNonce: string | undefined
+    let onReplicaBData: ((message: AuthMessage) => Promise<void>) | undefined
+    const replicaATransport: Transport = {
+      async onData(): Promise<void> {},
+      async send(message): Promise<void> {
+        sessionNonce = message.initialNonce
+        initialRequestSent.resolve(undefined)
+        await sendGate.promise
+      }
+    }
+    const replicaBTransport: Transport = {
+      async onData(callback): Promise<void> {
+        onReplicaBData = callback
+      },
+      async send(): Promise<void> {
+        throw new Error('unexpected replica B send')
+      }
+    }
+    const replicaBWallet = makeWallet()
+    ;(replicaBWallet.verifySignature as jest.Mock).mockImplementation(() => {
+      verificationStarted.resolve(undefined)
+      return verification.promise
+    })
+    const replicaA = new Peer(makeWallet(), replicaATransport, undefined, sessionManager)
+    const replicaB = new Peer(replicaBWallet, replicaBTransport, undefined, sessionManager)
+    await Promise.all([replicaA.ready, replicaB.ready])
+    const controller = new AbortController()
+    const abortError = new Error('cancel replica A handshake')
+
+    const sending = replicaA.toPeer([1, 2, 3], undefined, controller.signal)
+    await initialRequestSent.promise
+    const responseTask = onReplicaBData?.({
+      version: '0.1',
+      messageType: 'initialResponse',
+      identityKey: serverIdentityKey,
+      initialNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+      yourNonce: sessionNonce,
+      signature: [1, 2, 3]
+    }) as Promise<void>
+    const responseRejection = expect(responseTask).rejects.toThrow(
+      'Peer session is no longer pending'
+    )
+    await verificationStarted.promise
+
+    controller.abort(abortError)
+    await expect(sending).rejects.toBe(abortError)
+    expect(sessionManager.sessions.size).toBe(0)
+
+    verification.resolve({ valid: true })
+    await responseRejection
+    expect(sessionManager.sessions.size).toBe(0)
+    expect((replicaA as any).initialResponseTasks.size).toBe(0)
+    expect((replicaA as any).cancelledInitialResponseSessions.size).toBe(0)
+    expect((replicaB as any).initialResponseTasks.size).toBe(0)
+
+    sendGate.reject(new Error('late replica A transport failure'))
+    await Promise.resolve()
   })
 
   test('handshake cleanup leaves legacy async store rows for safe maintenance', async () => {

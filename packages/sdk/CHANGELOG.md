@@ -320,12 +320,14 @@ All notable changes to this project will be documented in this file. The format 
   gateway and wallet-denial errors and never automatically replay a write after
   its deadline. Coordinate cancellation with in-progress initial-response work
   and atomically clean up an aborted unauthenticated handshake when the session
-  manager supports it, without deleting one that completed authentication.
-  Durable async stores may implement the optional conditional removal; legacy
-  stores retain cancelled rows for normal TTL rather than risk a racy delete.
+  manager supports paired conditional authentication and removal, without
+  deleting one that completed authentication or allowing a stale cross-replica
+  authentication upsert. Durable async stores may implement the optional atomic
+  pair; legacy or partially upgraded stores retain cancelled rows for normal TTL
+  rather than risk a racy delete.
   The exact packed browser
-  graph measures 744,619 Vite / 562,126 esbuild / 557,165 UMD raw bytes. The
-  reviewed raw ceilings are 745,000 / 562,500 / 557,500 bytes; compression
+  graph measures 745,578 Vite / 562,797 esbuild / 557,845 UMD raw bytes. The
+  reviewed raw ceilings are 746,000 / 564,000 / 558,500 bytes; compression
   ceilings remain unchanged.
 
 ### Added

@@ -680,8 +680,26 @@ export class Peer {
         throwIfSendAborted(signal)
         await this.#transport.send(snapshotBoundedAuthData(initialRequest), signal)
       })
-      const [responseNonce] = await Promise.all([initialResponse, send])
-      return responseNonce
+      const handshake = Promise.all([initialResponse, send])
+      if (signal == null) {
+        const [responseNonce] = await handshake
+        return responseNonce
+      }
+
+       let removeAbortListener = (): void => {}
+       const abort = new Promise<never>((_resolve, reject) => {
+         const onAbort = (): void =>
+           reject(signal.reason ?? new Error('The operation was aborted.'))
+        signal.addEventListener('abort', onAbort, { once: true })
+        removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+        if (signal.aborted) onAbort()
+      })
+      try {
+        const [responseNonce] = await Promise.race([handshake, abort])
+        return responseNonce
+      } finally {
+        removeAbortListener()
+      }
     } catch (error) {
       this.stopListeningForInitialResponsesByNonce(sessionNonce)
       this.cancelledInitialResponseSessions.add(sessionNonce)
@@ -693,7 +711,13 @@ export class Peer {
         const removeSessionIfUnauthenticated = (
           this.sessionManager as SessionManager & AsyncSessionManager
         ).removeSessionIfUnauthenticated
-        if (typeof removeSessionIfUnauthenticated === 'function') {
+        const updateSessionIfUnauthenticated = (
+          this.sessionManager as SessionManager & AsyncSessionManager
+        ).updateSessionIfUnauthenticated
+        if (
+          typeof removeSessionIfUnauthenticated === 'function' &&
+          typeof updateSessionIfUnauthenticated === 'function'
+        ) {
           await removeSessionIfUnauthenticated.call(this.sessionManager, sessionNonce)
         }
       } finally {
@@ -996,24 +1020,42 @@ export class Peer {
       message.messageType
     )
 
-    // --- Transport authentication complete ---
-    peerSession.peerNonce = message.initialNonce
-    peerSession.peerIdentityKey = message.identityKey
-    peerSession.isAuthenticated = true
-
     // Taken before the refill below, which a store that lost the snapshot must never turn
     // into zero-field authority.
     const zeroFieldPolicy = this.#takeZeroFieldPolicy(peerSession)
 
     peerSession.certificatePolicy ??= this.#snapshotCertificatePolicy(this.certificatesToRequest)
-    peerSession.certificatesRequired = peerSession.certificatePolicy.certifiers.length > 0
+    const certificatesRequired = peerSession.certificatePolicy.certifiers.length > 0
 
-    // IMPORTANT: validation defaults to false if certs are required
-    peerSession.certificatesValidated = !peerSession.certificatesRequired
+    // --- Transport authentication complete ---
+    const authenticatedSession: PeerSession = {
+      ...peerSession,
+      peerNonce: message.initialNonce,
+      peerIdentityKey: message.identityKey,
+      isAuthenticated: true,
+      certificatesRequired,
+      // IMPORTANT: validation defaults to false if certs are required
+      certificatesValidated: !certificatesRequired,
+      lastUpdate: Date.now()
+    }
 
-    peerSession.lastUpdate = Date.now()
-    await this.sessionManager.updateSession(peerSession)
-    return { peerSession, zeroFieldPolicy }
+    const coordinatedManager = this.sessionManager as SessionManager & AsyncSessionManager
+    const updateSessionIfUnauthenticated = coordinatedManager.updateSessionIfUnauthenticated
+    if (
+      typeof updateSessionIfUnauthenticated === 'function' &&
+      typeof coordinatedManager.removeSessionIfUnauthenticated === 'function'
+    ) {
+      const updated = await updateSessionIfUnauthenticated.call(
+        this.sessionManager,
+        authenticatedSession
+      )
+      if (!updated) {
+        throw new Error(`Peer session is no longer pending for peer: ${message.identityKey}`)
+      }
+    } else {
+      await this.sessionManager.updateSession(authenticatedSession)
+    }
+    return { peerSession: authenticatedSession, zeroFieldPolicy }
   }
 
   /**
