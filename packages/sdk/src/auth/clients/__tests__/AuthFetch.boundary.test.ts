@@ -540,8 +540,8 @@ describe('AuthFetch pending-request boundary', () => {
     const recursiveResponse = new Response('retried', { status: 200 })
     const fetchSpy = jest
       .spyOn(authFetch as any, 'fetchWithinDeadline')
-      .mockImplementationOnce((url, retryConfig, deadline) =>
-        originalFetchWithinDeadline(url, retryConfig, deadline)
+      .mockImplementationOnce((url, retryConfig, deadline, dispatchState) =>
+        originalFetchWithinDeadline(url, retryConfig, deadline, dispatchState)
       )
       .mockResolvedValueOnce(recursiveResponse)
     const config: any = {}

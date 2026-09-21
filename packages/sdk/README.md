@@ -40,7 +40,8 @@ times out. The timeout message remains
 contain the request ID plus `dispatchState: 'not-dispatched'` or
 `'possibly-dispatched'`. For the application request, Peer marks the latter
 immediately before entering the transport, so it conservatively includes
-delayed or cancellation-ignoring custom transports. The server may still
+delayed or cancellation-ignoring custom transports and remains cumulative
+across stale-session recovery attempts. The server may still
 complete such a request; callers must resolve its outcome before retrying a
 non-idempotent write. AuthFetch does not automatically retry after the deadline.
 
@@ -51,9 +52,10 @@ optional pair `updateSessionIfUnauthenticated(session)` and
 the update returns `true` only when it transitioned the still-unauthenticated
 row, while the remove deletes only that state. Peer enables durable cleanup
 only when both methods exist. Legacy or partially upgraded async stores remain
-compatible; Peer leaves their cancelled row for normal TTL or session
-maintenance instead of risking a delete followed by a stale authenticated
-upsert from another replica.
+source-compatible for non-cancellable Peer flows, but AuthFetch and other
+cancellable new-session handshakes fail before creating a row or sending until
+the store implements both methods. This prevents a delayed response from
+authenticating or disclosing certificates after cancellation.
 
 AuthFetch's automatic BRC-105 payment path delegates spending authorization to
 the configured wallet's `createAction` policy. Use a wallet that requires the

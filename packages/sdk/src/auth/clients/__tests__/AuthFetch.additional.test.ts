@@ -92,12 +92,13 @@ describe('AuthFetch.fetch – retryCounter', () => {
     jest.spyOn(authFetch as any, 'fetchWithinDeadline').mockImplementation(async (
       url: string,
       config: any,
-      deadline?: number
+      deadline?: number,
+      dispatchState?: string
     ) => {
       fetchCallCount++
       if (fetchCallCount === 1) {
         // First call: run the real code path so the stale-session branch triggers
-        return originalFetchWithinDeadline(url, config, deadline)
+        return originalFetchWithinDeadline(url, config, deadline, dispatchState)
       }
       // Subsequent calls (recursive retry after stale-session): throw to prove
       // the retry occurred with a decremented retryCounter.

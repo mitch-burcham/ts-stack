@@ -327,10 +327,12 @@ All notable changes to this project will be documented in this file. The format 
   manager supports paired conditional authentication and removal, without
   deleting one that completed authentication or allowing a stale cross-replica
   authentication upsert. Durable async stores may implement the optional atomic
-  pair; legacy or partially upgraded stores retain cancelled rows for normal TTL
-  rather than risk a racy delete.
+  pair. Legacy or partially upgraded stores remain compatible for non-cancellable
+  Peer flows, while cancellable new-session handshakes fail before row creation
+  or transport send. Preserve cumulative `possibly-dispatched` state across
+  stale-session recovery attempts.
   The exact packed browser
-  graph measures 748,462 Vite / 564,695 esbuild / 559,748 UMD raw bytes. The
+  graph measures 748,819 Vite / 564,990 esbuild / 560,055 UMD raw bytes. The
   reviewed raw ceilings are 749,000 / 566,000 / 560,500 bytes; compression
   ceilings remain unchanged.
 

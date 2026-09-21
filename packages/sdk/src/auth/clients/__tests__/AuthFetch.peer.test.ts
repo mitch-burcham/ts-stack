@@ -387,8 +387,8 @@ describe('AuthFetch authenticated peer lifecycle', () => {
     const recoveredResponse = new Response('recovered', { status: 200 })
     const fetchSpy = jest.spyOn(authFetch as any, 'fetchWithinDeadline')
     fetchSpy
-      .mockImplementationOnce((url, config, deadline) =>
-        originalFetchWithinDeadline(url, config, deadline)
+      .mockImplementationOnce((url, config, deadline, dispatchState) =>
+        originalFetchWithinDeadline(url, config, deadline, dispatchState)
       )
       .mockResolvedValueOnce(recoveredResponse)
 
@@ -421,8 +421,8 @@ describe('AuthFetch authenticated peer lifecycle', () => {
     const recoveredResponse = new Response('recovered', { status: 200 })
     const fetchSpy = jest.spyOn(authFetch as any, 'fetchWithinDeadline')
     fetchSpy
-      .mockImplementationOnce((url, config, deadline) =>
-        originalFetchWithinDeadline(url, config, deadline)
+      .mockImplementationOnce((url, config, deadline, dispatchState) =>
+        originalFetchWithinDeadline(url, config, deadline, dispatchState)
       )
       .mockResolvedValueOnce(recoveredResponse)
 

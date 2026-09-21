@@ -453,6 +453,94 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect((peer as any).cancelledInitialResponseSessions.size).toBe(0)
   })
 
+  test.each([
+    ['neither atomic method', false, false],
+    ['only atomic update', true, false],
+    ['only atomic removal', false, true]
+  ])('cancellable handshake fails closed with a manager providing %s', async (
+    _description,
+    hasUpdate,
+    hasRemoval
+  ) => {
+    const sessions = new Map<string, PeerSession>()
+    const sessionManager: any = {
+      addSession: jest.fn(async (session: PeerSession) => {
+        sessions.set(session.sessionNonce as string, session)
+      }),
+      updateSession: jest.fn(async (session: PeerSession) => {
+        sessions.set(session.sessionNonce as string, session)
+      }),
+      getSession: jest.fn(async (identifier: string) => sessions.get(identifier)),
+      removeSession: jest.fn(async (session: PeerSession) => {
+        sessions.delete(session.sessionNonce as string)
+      }),
+      hasSession: jest.fn(async (identifier: string) => sessions.has(identifier))
+    }
+    if (hasUpdate) {
+      sessionManager.updateSessionIfUnauthenticated = jest.fn(async () => false)
+    }
+    if (hasRemoval) {
+      sessionManager.removeSessionIfUnauthenticated = jest.fn(async () => {})
+    }
+    let onData: ((message: AuthMessage) => Promise<void>) | undefined
+    const transport: Transport = {
+      send: jest.fn(async () => {}),
+      async onData(callback): Promise<void> {
+        onData = callback
+      }
+    }
+    const wallet = makeWallet() as any
+    wallet.listCertificates = jest.fn()
+    wallet.proveCertificate = jest.fn()
+    const peer = new Peer(wallet, transport, undefined, sessionManager)
+    await peer.ready
+    const certificatesRequested = jest.fn()
+    peer.listenForCertificatesRequested(certificatesRequested)
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+
+    await expect(authFetch.fetch(`${baseUrl}/write`)).rejects.toThrow(
+      'Cancellable handshakes require a session manager implementing both updateSessionIfUnauthenticated and removeSessionIfUnauthenticated.'
+    )
+    expect(sessions.size).toBe(0)
+    expect(sessionManager.addSession).not.toHaveBeenCalled()
+    expect(sessionManager.updateSession).not.toHaveBeenCalled()
+    expect(transport.send).not.toHaveBeenCalled()
+    expect(wallet.createHmac).not.toHaveBeenCalled()
+    expect(wallet.getPublicKey).not.toHaveBeenCalled()
+    expect(wallet.verifyHmac).not.toHaveBeenCalled()
+    expect(wallet.verifySignature).not.toHaveBeenCalled()
+    expect(wallet.createSignature).not.toHaveBeenCalled()
+    expect(wallet.listCertificates).not.toHaveBeenCalled()
+    expect(wallet.proveCertificate).not.toHaveBeenCalled()
+    expect(certificatesRequested).not.toHaveBeenCalled()
+
+    await expect(onData?.({
+      version: '0.1',
+      messageType: 'initialResponse',
+      identityKey: serverIdentityKey,
+      initialNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+      yourNonce: 'late-session-nonce',
+      requestedCertificates: {
+        certifiers: [serverIdentityKey],
+        types: { testType: ['name'] }
+      },
+      signature: [1, 2, 3]
+    })).rejects.toThrow('Peer session not found')
+    expect(sessions.size).toBe(0)
+    expect(transport.send).not.toHaveBeenCalled()
+    expect(wallet.verifyHmac).toHaveBeenCalledTimes(1)
+    expect(wallet.verifySignature).not.toHaveBeenCalled()
+    expect(wallet.listCertificates).not.toHaveBeenCalled()
+    expect(certificatesRequested).not.toHaveBeenCalled()
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
   test('late initial certificate approval cannot dispatch after handshake timeout', async () => {
     jest.useFakeTimers()
     const approval = deferred<any>()
@@ -594,12 +682,18 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)
   })
 
-  test('stale-session recovery cannot outlive the original deadline', async () => {
+  test('stale-session recovery keeps prior dispatch state through the original deadline', async () => {
     jest.useFakeTimers()
     const staleFailure = deferred<void>()
     const recoveredPeer = deferred<any>()
     const staleError = new Error('Session not found for nonce: stale')
-    const firstToPeer = jest.fn(async () => {
+    const firstToPeer = jest.fn(async (
+      _message: number[],
+      _identityKey?: string,
+      _signal?: AbortSignal,
+      onDispatch?: () => void
+    ) => {
+      onDispatch?.()
       await staleFailure.promise
       throw staleError
     })
@@ -638,7 +732,7 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect(retryToPeer).not.toHaveBeenCalled()
 
     await jest.advanceTimersByTimeAsync(1)
-    expectSafeTimeout(await rejection, 'not-dispatched')
+    expectSafeTimeout(await rejection, 'possibly-dispatched')
 
     recoveredPeer.resolve(retryPeer)
     await jest.advanceTimersByTimeAsync(0)

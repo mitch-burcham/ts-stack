@@ -12,7 +12,9 @@ import { PeerSession } from './types.js'
  *
  * {@link Peer} accepts `SessionManager | AsyncSessionManager` and awaits every
  * call internally, so sync stores incur no extra latency while async stores
- * work transparently.
+ * work transparently. Cancellable new-session handshakes require both optional
+ * atomic methods below; legacy implementations remain usable for
+ * non-cancellable Peer flows.
  */
 export interface AsyncSessionManager {
   addSession: (session: PeerSession) => Promise<void>

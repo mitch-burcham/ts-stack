@@ -643,6 +643,18 @@ export class Peer {
     identityKey?: string,
     signal?: AbortSignal
   ): Promise<string> {
+    throwIfSendAborted(signal)
+    if (signal != null) {
+      const sessionManager = this.sessionManager as SessionManager & AsyncSessionManager
+      if (
+        typeof sessionManager.updateSessionIfUnauthenticated !== 'function' ||
+        typeof sessionManager.removeSessionIfUnauthenticated !== 'function'
+      ) {
+        throw new Error(
+          'Cancellable handshakes require a session manager implementing both updateSessionIfUnauthenticated and removeSessionIfUnauthenticated.'
+        )
+      }
+    }
     const sessionNonce = await createNonce(this.#wallet, undefined, this.#originator)
     throwIfSendAborted(signal)
 
