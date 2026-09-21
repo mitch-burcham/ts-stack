@@ -1207,14 +1207,14 @@ export class Peer {
     }
     tasks.add(task)
     try {
-      try {
-        await task
-      } finally {
-        tasks.delete(task)
-        if (tasks.size === 0) {
-          this.initialResponseTasks.delete(sessionNonce)
-        }
+      await task
+    } finally {
+      tasks.delete(task)
+      if (tasks.size === 0) {
+        this.initialResponseTasks.delete(sessionNonce)
       }
+    }
+    try {
       await this.#answerInitialCertificateRequest(message, signal)
     } finally {
       this.initialResponseSignals.delete(sessionNonce)

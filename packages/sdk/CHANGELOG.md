@@ -332,7 +332,7 @@ All notable changes to this project will be documented in this file. The format 
   or transport send. Preserve cumulative `possibly-dispatched` state across
   stale-session recovery attempts.
   The exact packed browser
-  graph measures 748,819 Vite / 564,990 esbuild / 560,055 UMD raw bytes. The
+  graph measures 748,809 Vite / 564,990 esbuild / 560,055 UMD raw bytes. The
   reviewed raw ceilings are 749,000 / 566,000 / 560,500 bytes; compression
   ceilings remain unchanged.
 

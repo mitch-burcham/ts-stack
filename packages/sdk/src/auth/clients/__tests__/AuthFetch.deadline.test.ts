@@ -541,7 +541,7 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)
   })
 
-  test('late initial certificate approval cannot dispatch after handshake timeout', async () => {
+  test('invalid response cannot clear signal before valid response certificate approval', async () => {
     jest.useFakeTimers()
     const approval = deferred<any>()
     const approvalStarted = deferred<void>()
@@ -551,6 +551,9 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
       types: { testType: ['name'] }
     }
     const wallet = makeWallet() as any
+    wallet.verifySignature
+      .mockResolvedValueOnce({ valid: false })
+      .mockResolvedValue({ valid: true })
     wallet.listCertificates = jest.fn(() => {
       approvalStarted.resolve(undefined)
       return approval.promise
@@ -558,6 +561,7 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     wallet.proveCertificate = jest.fn(async () => ({
       keyringForVerifier: { name: 'revealed-key' }
     }))
+    let invalidResponseError: unknown
     const transportSend = jest
       .spyOn(SimplifiedFetchTransport.prototype, 'send')
       .mockImplementation(async function (
@@ -566,6 +570,19 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
       ): Promise<void> {
         if (message.messageType !== 'initialRequest') {
           throw new Error(`unexpected ${message.messageType} send`)
+        }
+        try {
+          await (this as any).onDataCallback({
+            version: '0.1',
+            messageType: 'initialResponse',
+            identityKey: serverIdentityKey,
+            initialNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+            yourNonce: message.initialNonce,
+            requestedCertificates,
+            signature: [9, 9, 9]
+          })
+        } catch (error) {
+          invalidResponseError = error
         }
         await (this as any).onDataCallback({
           version: '0.1',
@@ -584,8 +601,13 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     await approvalStarted.promise
     const peerState = authFetch.peers[baseUrl]
     const peer = peerState.peer
+    expect(invalidResponseError).toEqual(expect.objectContaining({
+      message: expect.stringContaining('Unable to verify initial response signature')
+    }))
+    expect(wallet.verifySignature).toHaveBeenCalledTimes(2)
     expect(peerState.pendingCertificateRequests).toEqual([true])
     expect((peer as any).initialResponseTasks.size).toBe(0)
+    expect((peer as any).initialResponseSignals.size).toBe(1)
 
     await jest.advanceTimersByTimeAsync(30000)
     expectSafeTimeout(await rejection, 'not-dispatched')
