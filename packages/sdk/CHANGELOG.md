@@ -318,10 +318,14 @@ All notable changes to this project will be documented in this file. The format 
   request ID and conservative `not-dispatched` or `possibly-dispatched` details.
   Wallet prompts are not cancelled; late results are ignored. Preserve immediate
   gateway and wallet-denial errors and never automatically replay a write after
-  its deadline. Clean up an aborted unauthenticated handshake session without
-  deleting one that completed authentication. The exact packed browser
-  graph measures 743,189 Vite / 561,053 esbuild / 556,096 UMD raw bytes. The
-  reviewed raw ceilings are 743,500 / 561,500 / 556,500 bytes; compression
+  its deadline. Coordinate cancellation with in-progress initial-response work
+  and atomically clean up an aborted unauthenticated handshake when the session
+  manager supports it, without deleting one that completed authentication.
+  Durable async stores may implement the optional conditional removal; legacy
+  stores retain cancelled rows for normal TTL rather than risk a racy delete.
+  The exact packed browser
+  graph measures 744,619 Vite / 562,126 esbuild / 557,165 UMD raw bytes. The
+  reviewed raw ceilings are 745,000 / 562,500 / 557,500 bytes; compression
   ceilings remain unchanged.
 
 ### Added

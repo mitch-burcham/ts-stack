@@ -19,6 +19,12 @@ export interface AsyncSessionManager {
   updateSession: (session: PeerSession) => Promise<void>
   getSession: (identifier: string) => Promise<PeerSession | undefined>
   removeSession: (session: PeerSession) => Promise<void>
+  /**
+   * Atomically removes the nonce-owned session only if it is still
+   * unauthenticated. Durable stores may implement this to clean cancelled
+   * handshakes without racing a concurrent authentication update.
+   */
+  removeSessionIfUnauthenticated?: (sessionNonce: string) => Promise<void>
   hasSession: (identifier: string) => Promise<boolean>
   /**
    * Atomically claim a signed BRC-103 message nonce for one session.
@@ -253,6 +259,14 @@ export class SessionManager {
     if (existing != null) this.#removeSessionIndexes(existing)
     this.#sessionNonceToSession.delete(session.sessionNonce)
     this.#consumedMessageNonces.delete(session.sessionNonce)
+  }
+
+  /** Atomically removes a cancelled handshake that has not authenticated. */
+  removeSessionIfUnauthenticated(sessionNonce: string): void {
+    const session = this.#sessionNonceToSession.get(sessionNonce)
+    if (session?.isAuthenticated === false) {
+      this.removeSession(session)
+    }
   }
 
   /**

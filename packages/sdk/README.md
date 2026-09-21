@@ -39,6 +39,13 @@ delayed or cancellation-ignoring custom transports. The server may still
 complete such a request; callers must resolve its outcome before retrying a
 non-idempotent write. AuthFetch does not automatically retry after the deadline.
 
+The in-memory `SessionManager` atomically removes a cancelled handshake only
+while it remains unauthenticated. Durable `AsyncSessionManager` implementations
+may provide optional `removeSessionIfUnauthenticated(sessionNonce)` with the
+same atomic compare-and-remove behavior. Legacy async stores remain compatible;
+Peer leaves their cancelled unauthenticated row for normal TTL or session
+maintenance instead of issuing a racy get-then-remove.
+
 AuthFetch's automatic BRC-105 payment path delegates spending authorization to
 the configured wallet's `createAction` policy. Use a wallet that requires the
 intended user or policy approval. Payment logs and terminal errors omit URL

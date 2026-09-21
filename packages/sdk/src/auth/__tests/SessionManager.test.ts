@@ -159,6 +159,27 @@ describe('SessionManager', () => {
     })
   })
 
+  describe('removeSessionIfUnauthenticated', () => {
+    it('removes an unauthenticated session', () => {
+      sessionManager.addSession(validSession)
+
+      sessionManager.removeSessionIfUnauthenticated('testSessionNonce')
+
+      expect(sessionManager.getSession('testSessionNonce')).toBeUndefined()
+      expect(sessionManager.getSession('testPeerIdentityKey')).toBeUndefined()
+    })
+
+    it('preserves an authenticated session', () => {
+      validSession.isAuthenticated = true
+      sessionManager.addSession(validSession)
+
+      sessionManager.removeSessionIfUnauthenticated('testSessionNonce')
+
+      expect(sessionManager.getSession('testSessionNonce')).toBe(validSession)
+      expect(sessionManager.getSession('testPeerIdentityKey')).toBe(validSession)
+    })
+  })
+
   describe('hasSession', () => {
     it('should return true if a session exists for the identifier', () => {
       sessionManager.addSession(validSession)
