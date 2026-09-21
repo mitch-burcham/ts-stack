@@ -22,15 +22,22 @@ responses now verify; non-empty response encoding is unchanged. Servers that
 sign a zero body length for an empty response must adopt the specified sentinel.
 
 AuthFetch gives each authenticated request a private 30-second cancellation
-lifecycle. The deadline aborts handshake or request fetches and prevents the
-application request from being dispatched when pending certificate, session,
-or wallet work finishes late. It does not cancel an already displayed wallet
-approval prompt; the late result is ignored. The timeout message remains
+lifecycle. The deadline prevents application dispatch when pending
+certificate, session, or wallet work finishes late. The maintained
+`SimplifiedFetchTransport` also forwards the optional abort signal to handshake
+and application fetches. It does not cancel an already displayed wallet
+approval prompt; the late result is ignored. Custom `Transport`
+implementations must check the optional signal before any delayed side-effect
+dispatch and forward it to cancellation-aware I/O. A transport that ignores
+the signal after `send` begins may still dispatch after the AuthFetch promise
+times out. The timeout message remains
 `Timed out waiting for authenticated response.` and its non-secret `details`
 contain the request ID plus `dispatchState: 'not-dispatched'` or
-`'possibly-dispatched'`. The latter means the server may still complete the
-request, so callers must resolve its outcome before retrying a non-idempotent
-write. AuthFetch does not automatically retry after the deadline.
+`'possibly-dispatched'`. For the application request, Peer marks the latter
+immediately before entering the transport, so it conservatively includes
+delayed or cancellation-ignoring custom transports. The server may still
+complete such a request; callers must resolve its outcome before retrying a
+non-idempotent write. AuthFetch does not automatically retry after the deadline.
 
 AuthFetch's automatic BRC-105 payment path delegates spending authorization to
 the configured wallet's `createAction` policy. Use a wallet that requires the

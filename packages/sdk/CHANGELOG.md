@@ -310,15 +310,19 @@ All notable changes to this project will be documented in this file. The format 
 - Require `accepted: true` from the wallet before accepting BRC-29 settlement.
 
 - Give each AuthFetch authenticated request a private cancellation lifecycle.
-  Abort handshake and application fetches at the 30-second deadline, cancel
-  pending-certificate polling, and prevent late wallet, session, or certificate
-  work from dispatching the application request. Preserve the exact timeout
-  message while adding non-secret request ID and `not-dispatched` or
-  `possibly-dispatched` details. Wallet prompts are not cancelled; late results
-  are ignored. Preserve immediate gateway and wallet-denial errors and never
-  automatically replay a write after its deadline. The exact packed browser
-  graph measures 743,033 Vite / 560,939 esbuild / 555,978 UMD raw bytes; only
-  the reviewed Vite raw ceiling moves, from 742,500 to 743,500 bytes.
+  Cancel pending-certificate polling and prevent late wallet, session, or
+  certificate work from entering the transport. The maintained fetch transport
+  forwards the deadline signal to handshake and application fetches; custom
+  transports must honor the optional signal before delayed side-effect dispatch
+  and in their I/O. Preserve the exact timeout message while adding non-secret
+  request ID and conservative `not-dispatched` or `possibly-dispatched` details.
+  Wallet prompts are not cancelled; late results are ignored. Preserve immediate
+  gateway and wallet-denial errors and never automatically replay a write after
+  its deadline. Clean up an aborted unauthenticated handshake session without
+  deleting one that completed authentication. The exact packed browser
+  graph measures 743,189 Vite / 561,053 esbuild / 556,096 UMD raw bytes. The
+  reviewed raw ceilings are 743,500 / 561,500 / 556,500 bytes; compression
+  ceilings remain unchanged.
 
 ### Added
 

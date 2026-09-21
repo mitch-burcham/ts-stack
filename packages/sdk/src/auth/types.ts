@@ -43,6 +43,11 @@ export interface AuthMessage {
 }
 
 export interface Transport {
+  /**
+   * Sends an authentication message. Implementations that delay side effects
+   * must check an already-aborted signal before dispatch and forward it to
+   * cancellation-aware I/O when available.
+   */
   send: (message: AuthMessage, signal?: AbortSignal) => Promise<void>
   onData: (callback: (message: AuthMessage) => Promise<void>) => Promise<void>
 }

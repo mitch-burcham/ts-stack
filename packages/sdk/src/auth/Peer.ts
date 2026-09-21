@@ -175,6 +175,8 @@ export class Peer {
    *
    * @param {number[]} message - The message payload to send.
    * @param {string} [identityKey] - The identity public key of the peer, or an exact session nonce for a transport response. If not provided, uses the peer from the most recent locally initiated handshake (if any). Inbound messages never select this implicit destination.
+   * @param {AbortSignal} [signal] - Optional internal cancellation signal forwarded to the transport.
+   * @param {() => void} [onDispatch] - Optional internal marker invoked immediately before the general-message transport send.
    * @returns {Promise<void>}
    * @throws Will throw an error if the message fails to send.
    */
@@ -677,7 +679,9 @@ export class Peer {
     } catch (error) {
       this.stopListeningForInitialResponsesByNonce(sessionNonce)
       const failedSession = await this.sessionManager.getSession(sessionNonce)
-      if (failedSession != null) await this.sessionManager.removeSession(failedSession)
+      if (failedSession?.isAuthenticated === false) {
+        await this.sessionManager.removeSession(failedSession)
+      }
       throw error
     } finally {
       this.#initiatedCertificatePolicies.delete(sessionNonce)

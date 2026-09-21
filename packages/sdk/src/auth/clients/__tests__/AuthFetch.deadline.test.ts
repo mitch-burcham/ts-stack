@@ -1,8 +1,8 @@
 import { jest } from '@jest/globals'
 
 import { Peer } from '../../Peer.js'
-import { SessionManager } from '../../SessionManager.js'
-import { AuthMessage, Transport } from '../../types.js'
+import { AsyncSessionManager, SessionManager } from '../../SessionManager.js'
+import { AuthMessage, PeerSession, Transport } from '../../types.js'
 import { SimplifiedFetchTransport } from '../../transports/SimplifiedFetchTransport.js'
 import { PrivateKey } from '../../../primitives/index.js'
 import { WalletInterface } from '../../../wallet/Wallet.interfaces.js'
@@ -34,10 +34,42 @@ function makeWallet(
 ): WalletInterface {
   return {
     createSignature,
+    createHmac: jest.fn(async () => ({ hmac: Array.from({ length: 32 }).fill(4) })),
     getPublicKey: jest.fn(async () => ({ publicKey: clientIdentityKey })),
     verifyHmac: jest.fn(async () => ({ valid: true })),
     verifySignature: jest.fn(async () => ({ valid: true }))
   } as unknown as WalletInterface
+}
+
+class AsyncTestSessionManager implements AsyncSessionManager {
+  readonly sessions = new Map<string, PeerSession>()
+
+  async addSession(session: PeerSession): Promise<void> {
+    await Promise.resolve()
+    this.sessions.set(session.sessionNonce as string, session)
+  }
+
+  async updateSession(session: PeerSession): Promise<void> {
+    await Promise.resolve()
+    this.sessions.set(session.sessionNonce as string, session)
+  }
+
+  async getSession(identifier: string): Promise<PeerSession | undefined> {
+    await Promise.resolve()
+    return (
+      this.sessions.get(identifier) ??
+      [...this.sessions.values()].find(session => session.peerIdentityKey === identifier)
+    )
+  }
+
+  async removeSession(session: PeerSession): Promise<void> {
+    await Promise.resolve()
+    this.sessions.delete(session.sessionNonce as string)
+  }
+
+  async hasSession(identifier: string): Promise<boolean> {
+    return (await this.getSession(identifier)) != null
+  }
 }
 
 async function makeAuthenticatedHarness(
@@ -113,6 +145,73 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect(jest.getTimerCount()).toBe(0)
   })
 
+  test('initial handshake timeout removes its listener and unauthenticated async session', async () => {
+    jest.useFakeTimers()
+    let handshakeSignal: AbortSignal | undefined
+    const fetchClient = jest.fn<typeof fetch>(async (_input, init) => {
+      handshakeSignal = init?.signal ?? undefined
+      return await new Promise<Response>((_resolve, reject) => {
+        handshakeSignal?.addEventListener('abort', () => reject(handshakeSignal?.reason), {
+          once: true
+        })
+      })
+    })
+    const wallet = makeWallet()
+    const sessionManager = new AsyncTestSessionManager()
+    const peer = new Peer(wallet, new SimplifiedFetchTransport(baseUrl, fetchClient), undefined, sessionManager)
+    await peer.ready
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(fetchClient).toHaveBeenCalledTimes(1)
+    expect(String(fetchClient.mock.calls[0]?.[0])).toBe(`${baseUrl}/.well-known/auth`)
+    expect(sessionManager.sessions.size).toBe(1)
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(1)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+    await jest.advanceTimersByTimeAsync(0)
+
+    expect(handshakeSignal?.aborted).toBe(true)
+    expect(sessionManager.sessions.size).toBe(0)
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+    expect(fetchClient).toHaveBeenCalledTimes(1)
+  })
+
+  test('handshake failure does not remove a session that became authenticated', async () => {
+    const failure = new Error('transport failed after authentication completed')
+    const sessionManager = new AsyncTestSessionManager()
+    let sessionNonce: string | undefined
+    const transport: Transport = {
+      async onData(): Promise<void> {},
+      async send(message: AuthMessage): Promise<void> {
+        sessionNonce = message.initialNonce
+        const session = await sessionManager.getSession(sessionNonce as string)
+        if (session != null) {
+          session.isAuthenticated = true
+          await sessionManager.updateSession(session)
+        }
+        throw failure
+      }
+    }
+    const peer = new Peer(makeWallet(), transport, undefined, sessionManager)
+    await peer.ready
+
+    await expect(peer.toPeer([1, 2, 3])).rejects.toBe(failure)
+
+    expect(sessionNonce).toEqual(expect.any(String))
+    await expect(sessionManager.getSession(sessionNonce as string)).resolves.toMatchObject({
+      isAuthenticated: true
+    })
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+  })
+
   test('cancels the pending-certificate poll timer without dispatching', async () => {
     jest.useFakeTimers()
     const fetchClient = jest.fn<typeof fetch>()
@@ -175,6 +274,108 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     await jest.advanceTimersByTimeAsync(0)
     expect(recursiveFetch).toHaveBeenCalledTimes(1)
     expect(fetchClient).toHaveBeenCalledTimes(1)
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
+  test('classifies a cancellation-ignoring custom transport as possibly dispatched', async () => {
+    jest.useFakeTimers()
+    const delayedDispatch = deferred<void>()
+    let capturedSignal: AbortSignal | undefined
+    let sideEffects = 0
+    const transport: Transport = {
+      async onData(): Promise<void> {},
+      async send(message: AuthMessage, signal?: AbortSignal): Promise<void> {
+        if (message.messageType !== 'general') throw new Error('unexpected handshake')
+        capturedSignal = signal
+        await delayedDispatch.promise
+        // Deliberately violates the documented custom-transport contract by
+        // ignoring the aborted signal before its side effect.
+        sideEffects++
+      }
+    }
+    const wallet = makeWallet()
+    const sessionManager = new SessionManager()
+    sessionManager.addSession({
+      isAuthenticated: true,
+      sessionNonce,
+      peerNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+      peerIdentityKey: serverIdentityKey,
+      lastUpdate: Date.now()
+    })
+    const peer = new Peer(wallet, transport, undefined, sessionManager)
+    await peer.ready
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    const fetchCalls = jest.spyOn(authFetch, 'fetch')
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(capturedSignal?.aborted).toBe(false)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'possibly-dispatched')
+    expect(capturedSignal?.aborted).toBe(true)
+    expect(sideEffects).toBe(0)
+
+    delayedDispatch.resolve()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(sideEffects).toBe(1)
+    expect(fetchCalls).toHaveBeenCalledTimes(1)
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+  })
+
+  test('a cancellation-aware delayed custom transport suppresses its late side effect', async () => {
+    jest.useFakeTimers()
+    const delayedDispatch = deferred<void>()
+    let capturedSignal: AbortSignal | undefined
+    let sideEffects = 0
+    const transport: Transport = {
+      async onData(): Promise<void> {},
+      async send(message: AuthMessage, signal?: AbortSignal): Promise<void> {
+        if (message.messageType !== 'general') throw new Error('unexpected handshake')
+        capturedSignal = signal
+        await delayedDispatch.promise
+        signal?.throwIfAborted()
+        sideEffects++
+      }
+    }
+    const wallet = makeWallet()
+    const sessionManager = new SessionManager()
+    sessionManager.addSession({
+      isAuthenticated: true,
+      sessionNonce,
+      peerNonce: 'ERITFBUWFxgZGhscHR4fIA==',
+      peerIdentityKey: serverIdentityKey,
+      lastUpdate: Date.now()
+    })
+    const peer = new Peer(wallet, transport, undefined, sessionManager)
+    await peer.ready
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    const fetchCalls = jest.spyOn(authFetch, 'fetch')
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(capturedSignal?.aborted).toBe(false)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'possibly-dispatched')
+    expect(capturedSignal?.aborted).toBe(true)
+
+    delayedDispatch.resolve()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(sideEffects).toBe(0)
+    expect(fetchCalls).toHaveBeenCalledTimes(1)
     expect((authFetch as any).pendingRequestNonces.size).toBe(0)
   })
 

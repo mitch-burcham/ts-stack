@@ -97,6 +97,7 @@ export class SimplifiedFetchTransport implements Transport {
    * the message is sent as a POST request to the `/auth` endpoint.
    *
    * @param message - The AuthMessage to send.
+   * @param signal - Optional cancellation signal forwarded to fetch.
    * @returns A promise that resolves when the message is successfully sent.
    *
    * @throws Will throw an error if no listener has been registered via `onData`.
