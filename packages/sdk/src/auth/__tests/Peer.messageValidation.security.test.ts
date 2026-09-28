@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals'
 import PrivateKey from '../../primitives/PrivateKey.js'
 import * as Utils from '../../primitives/utils.js'
 import { Peer } from '../Peer.js'

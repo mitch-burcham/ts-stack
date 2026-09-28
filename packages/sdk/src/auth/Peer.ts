@@ -704,6 +704,7 @@ export class Peer {
       // Register before sending: an in-memory or otherwise synchronous transport
       // can deliver the response before send() resolves.
       const initialResponse = this.waitForInitialResponse(sessionNonce, signal)
+      void initialResponse.catch(() => {})
       this.#initiatedCertificatePolicies.set(
         sessionNonce,
         this.#snapshotCertificatePolicy(certificatePolicy)
@@ -714,22 +715,39 @@ export class Peer {
         throwIfSendAborted(signal)
         await this.#transport.send(snapshotBoundedAuthData(initialRequest), signal)
       })
+      // Keep the independently started send observed even if later composition
+      // is accidentally changed. The original promises remain rejected, so the
+      // handshake aggregate preserves its exact failure and cleanup behavior.
+      void send.catch(() => {})
       const handshake = Promise.all([initialResponse, send])
+      void handshake.catch(() => {})
+      const requireResponseNonce = (responseNonce: unknown): string => {
+        if (typeof responseNonce !== 'string' || responseNonce.length === 0) {
+          throw new Error('Initial response session nonce is required.')
+        }
+        return responseNonce
+      }
       if (signal == null) {
         const [responseNonce] = await handshake
-        return responseNonce
+        return requireResponseNonce(responseNonce)
       }
 
       let removeAbortListener = (): void => {}
-      const abort = new Promise<never>((_resolve, reject) => {
-        const onAbort = (): void => reject(signal.reason ?? new Error('The operation was aborted.'))
+      const aborted = Symbol('handshake aborted')
+      const abort = new Promise<typeof aborted>(resolve => {
+        if (signal == null) return
+        const onAbort = (): void => resolve(aborted)
         signal.addEventListener('abort', onAbort, { once: true })
         removeAbortListener = () => signal.removeEventListener('abort', onAbort)
         if (signal.aborted) onAbort()
       })
       try {
-        const [responseNonce] = await Promise.race([handshake, abort])
-        return responseNonce
+        const outcome = await Promise.race([handshake, abort])
+        if (outcome === aborted) {
+          throw signal.reason ?? new Error('The operation was aborted.')
+        }
+        const [responseNonce] = outcome
+        return requireResponseNonce(responseNonce)
       } finally {
         removeAbortListener()
       }

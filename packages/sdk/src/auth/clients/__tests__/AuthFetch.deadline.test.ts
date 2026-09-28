@@ -154,6 +154,96 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     jest.restoreAllMocks()
   })
 
+  test('rejects an already-expired internal deadline before peer creation', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(1_000)
+    const authFetch = new AuthFetch(makeWallet())
+    const getOrCreatePeer = jest.spyOn(authFetch as any, 'getOrCreatePeer')
+
+    const error = await (authFetch as any)
+      .fetchWithinDeadline(`${baseUrl}/expired`, {}, 999)
+      .catch((error: unknown) => error)
+
+    expectSafeTimeout(error, 'not-dispatched')
+    expect(getOrCreatePeer).not.toHaveBeenCalled()
+  })
+
+  test('expires after peer acquisition observes the absolute deadline', async () => {
+    jest.spyOn(Date, 'now').mockReturnValueOnce(1_000).mockReturnValue(2_000)
+    const authFetch = new AuthFetch(makeWallet())
+    const peerState = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 1),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: jest.fn(async () => {})
+      },
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    jest.spyOn(authFetch as any, 'getOrCreatePeer').mockResolvedValue(peerState)
+
+    const error = await (authFetch as any)
+      .fetchWithinDeadline(`${baseUrl}/expired-after-peer`, {}, 2_000)
+      .catch((error: unknown) => error)
+
+    expectSafeTimeout(error, 'not-dispatched')
+    expect(peerState.peer.listenForGeneralMessages).not.toHaveBeenCalled()
+    expect(peerState.peer.toPeer).not.toHaveBeenCalled()
+  })
+
+  test('legacy internal entry starts its deadline after request setup', async () => {
+    jest.useFakeTimers()
+    const authFetch = new AuthFetch(makeWallet())
+    const peerState = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 1),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: jest.fn(async () => {})
+      },
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+    jest.spyOn(authFetch as any, 'getOrCreatePeer').mockResolvedValue(peerState)
+
+    const rejection = (authFetch as any)
+      .fetchWithinDeadline(`${baseUrl}/legacy-internal`, {}, undefined)
+      .catch((error: unknown) => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(peerState.peer.toPeer).toHaveBeenCalledTimes(1)
+
+    await jest.advanceTimersByTimeAsync(30_000)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+    expect(peerState.peer.stopListeningForGeneralMessages).toHaveBeenCalledWith(1)
+    expect(jest.getTimerCount()).toBe(0)
+  })
+
+  test('stale recovery rejects when its inherited deadline is already exhausted', async () => {
+    const authFetch = new AuthFetch(makeWallet())
+    const requestId = 'expired-stale-request'
+    const peerState = {
+      peer: {} as any,
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+
+    const rejection = (authFetch as any).recoverAuthenticatedSend(
+      new Error('Session not found for nonce: stale'),
+      baseUrl,
+      `${baseUrl}/stale`,
+      {},
+      peerState,
+      Date.now() - 1,
+      requestId,
+      'possibly-dispatched',
+      jest.fn()
+    )
+
+    await expect(rejection).rejects.toMatchObject({
+      message: 'Timed out waiting for authenticated response.',
+      details: { requestId, dispatchState: 'possibly-dispatched' }
+    })
+  })
+
   test('late wallet approval is ignored and dispatches no application POST', async () => {
     jest.useFakeTimers()
     const approval = deferred<{ signature: number[] }>()

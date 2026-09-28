@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals'
 import { Peer } from '../Peer.js'
 import { AuthMessage, PeerSession, Transport } from '../types.js'
 import { AsyncSessionManager, SessionManager } from '../SessionManager.js'

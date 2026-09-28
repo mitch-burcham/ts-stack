@@ -168,8 +168,13 @@ export function buildMutationTargets(repositoryRoot) {
         'jest.config.js',
         [
           '<rootDir>/src/auth/__tests/Peer.boundary.test.ts',
+          '<rootDir>/src/auth/__tests/Peer.messageValidation.security.test.ts',
+          '<rootDir>/src/auth/__tests/Peer.zeroFields.test.ts',
+          '<rootDir>/src/auth/__tests/SessionManager.test.ts',
+          '<rootDir>/src/auth/clients/__tests__/AuthFetch.additional.test.ts',
           '<rootDir>/src/auth/clients/__tests__/AuthFetch.boundary.test.ts',
           '<rootDir>/src/auth/clients/__tests__/AuthFetch.deadline.test.ts',
+          '<rootDir>/src/auth/clients/__tests__/AuthFetch.peer.test.ts',
           '<rootDir>/src/auth/clients/__tests__/AuthFetch.property.test.ts',
           '<rootDir>/src/auth/transports/__tests__/SimplifiedFetchTransport*.test.ts'
         ],

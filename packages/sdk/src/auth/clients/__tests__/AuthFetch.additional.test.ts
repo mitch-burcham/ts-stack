@@ -19,18 +19,18 @@
  */
 
 import { jest } from '@jest/globals'
-import { AuthFetch } from '../AuthFetch.js'
 import { Utils, PrivateKey } from '../../../primitives/index.js'
 
 // ---------------------------------------------------------------------------
 // Module mock for createNonce (matches what primary test does)
 // ---------------------------------------------------------------------------
 
-jest.mock('../../utils/createNonce.js', () => ({
+jest.unstable_mockModule('../../utils/createNonce.js', () => ({
   createNonce: jest.fn()
 }))
 
-import { createNonce } from '../../utils/createNonce.js'
+const { AuthFetch } = await import('../AuthFetch.js')
+const { createNonce } = await import('../../utils/createNonce.js')
 
 const createNonceMock = createNonce as jest.MockedFunction<typeof createNonce>
 

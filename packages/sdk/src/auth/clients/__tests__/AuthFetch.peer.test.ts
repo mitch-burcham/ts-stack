@@ -1,27 +1,28 @@
 import { jest } from '@jest/globals'
 import * as Utils from '../../../primitives/utils.js'
-import { AuthFetch } from '../AuthFetch.js'
-import { Peer } from '../../Peer.js'
-import { SimplifiedFetchTransport } from '../../transports/SimplifiedFetchTransport.js'
-import { getVerifiableCertificates } from '../../utils/getVerifiableCertificates.js'
 
-jest.mock('../../Peer.js', () => ({
+jest.unstable_mockModule('../../Peer.js', () => ({
   Peer: jest.fn()
 }))
 
-jest.mock('../../transports/SimplifiedFetchTransport.js', () => ({
+jest.unstable_mockModule('../../transports/SimplifiedFetchTransport.js', () => ({
   SimplifiedFetchTransport: jest.fn(),
   DEFAULT_SIMPLIFIED_FETCH_MAX_RESPONSE_BYTES: 16 * 1024 * 1024
 }))
 
-jest.mock('../../utils/getVerifiableCertificates.js', () => ({
+jest.unstable_mockModule('../../utils/getVerifiableCertificates.js', () => ({
   getVerifiableCertificates: jest.fn()
 }))
 
-jest.mock('../../../primitives/Random.js', () => ({
+jest.unstable_mockModule('../../../primitives/Random.js', () => ({
   __esModule: true,
   default: jest.fn(() => Array.from({ length: 32 }).fill(7))
 }))
+
+const { AuthFetch } = await import('../AuthFetch.js')
+const { Peer } = await import('../../Peer.js')
+const { SimplifiedFetchTransport } = await import('../../transports/SimplifiedFetchTransport.js')
+const { getVerifiableCertificates } = await import('../../utils/getVerifiableCertificates.js')
 
 const PeerMock = Peer as unknown as jest.Mock
 const SimplifiedFetchTransportMock = SimplifiedFetchTransport as unknown as jest.Mock

@@ -47,6 +47,63 @@ describe('Peer handshake callback boundary', () => {
     expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
   })
 
+  test('rejects a handshake that completes without a response nonce', async () => {
+    const transport: Transport = {
+      async send() {},
+      async onData(_callback: (message: AuthMessage) => Promise<void>) {}
+    }
+    const peer = new Peer(new CompletedProtoWallet(new PrivateKey(40)), transport)
+    await peer.ready
+    jest.spyOn(peer as any, 'waitForInitialResponse').mockResolvedValue(undefined)
+
+    await expect(
+      (peer as any).initiateHandshake(new PrivateKey(41).toPublicKey().toString())
+    ).rejects.toThrow('Initial response session nonce is required.')
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+  })
+
+  test('uses a safe default error when a cancellation signal has no reason', async () => {
+    let abortListener: (() => void) | undefined
+    let signalRegistered!: () => void
+    const registered = new Promise<void>(resolve => {
+      signalRegistered = resolve
+    })
+    const addEventListener = jest.fn(
+      (_type: string, listener: EventListenerOrEventListenerObject) => {
+        abortListener = listener as () => void
+        signalRegistered()
+      }
+    )
+    const removeEventListener = jest.fn()
+    const signal = {
+      aborted: false,
+      reason: undefined,
+      addEventListener,
+      removeEventListener
+    } as unknown as AbortSignal
+    const transport: Transport = {
+      async send() {
+        await new Promise<void>(() => {})
+      },
+      async onData(_callback: (message: AuthMessage) => Promise<void>) {}
+    }
+    const peer = new Peer(new CompletedProtoWallet(new PrivateKey(38)), transport)
+    await peer.ready
+
+    const handshake = peer.getAuthenticatedSession(
+      new PrivateKey(39).toPublicKey().toString(),
+      signal
+    )
+    await registered
+    expect(abortListener).toEqual(expect.any(Function))
+
+    abortListener?.()
+
+    await expect(handshake).rejects.toThrow('The operation was aborted.')
+    expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function))
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+  })
+
   test('removes the exact failed session after the initial send rejects', async () => {
     const failure = new Error('transport failed after session allocation')
     const transport: Transport = {

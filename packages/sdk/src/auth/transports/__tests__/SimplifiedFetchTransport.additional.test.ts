@@ -153,6 +153,38 @@ describe('SimplifiedFetchTransport send without listener', () => {
   })
 })
 
+describe('SimplifiedFetchTransport external cancellation', () => {
+  test('uses a safe default error when an abort signal has no reason', async () => {
+    let abortListener: (() => void) | undefined
+    const addEventListener = jest.fn(
+      (_type: string, listener: EventListenerOrEventListenerObject) => {
+        abortListener = listener as () => void
+      }
+    )
+    const removeEventListener = jest.fn()
+    const signal = {
+      aborted: false,
+      reason: undefined,
+      addEventListener,
+      removeEventListener
+    } as unknown as AbortSignal
+    const mockFetch = jest.fn(async () => await new Promise<Response>(() => {})) as any
+    const transport = new SimplifiedFetchTransport('https://example.com', mockFetch)
+    await transport.onData(async () => {})
+
+    const sending = transport.send(makeGeneralMessage(), signal)
+    void sending.catch(() => {})
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(abortListener).toEqual(expect.any(Function))
+
+    abortListener?.()
+
+    await expect(sending).rejects.toThrow('The operation was aborted.')
+    expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function))
+  })
+})
+
 // ─── send: non-initialRequest auth message paths ─────────────────────────────
 
 describe('SimplifiedFetchTransport send — non-general auth message', () => {
@@ -171,6 +203,7 @@ describe('SimplifiedFetchTransport send — non-general auth message', () => {
     })
 
     const sendPromise = transport.send(makeAuthMessage('initialResponse'))
+    void sendPromise.catch(() => {})
     // resolve before the fetch response arrives to confirm promise doesn't hang
     resolveResponse!(
       new Response(
