@@ -207,11 +207,7 @@ export class SimplifiedFetchTransport implements Transport {
     return request
   }
 
-  async #fetchGeneralResponse(
-    url: string,
-    request: any,
-    signal?: AbortSignal
-  ): Promise<Response> {
+  async #fetchGeneralResponse(url: string, request: any, signal?: AbortSignal): Promise<Response> {
     try {
       return await this.fetchClient(url, {
         method: request.method,
@@ -367,12 +363,21 @@ export class SimplifiedFetchTransport implements Transport {
   async #sendGeneralMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {
     const request = this.#prepareGeneralRequest(message)
     const url = `${this.baseUrl}${request.urlPostfix}`
-    await this.#withDeadline(url, async deadlineSignal => {
-      const response = await this.#fetchGeneralResponse(url, request, deadlineSignal)
-      const body = await this.readResponseBody(url, response, this.maxResponseBytes, deadlineSignal)
-      this.#validateResponseAuthentication(url, response, body)
-      await this.onDataCallback!(this.#createGeneralResponseMessage(url, response, body))
-    }, signal)
+    await this.#withDeadline(
+      url,
+      async deadlineSignal => {
+        const response = await this.#fetchGeneralResponse(url, request, deadlineSignal)
+        const body = await this.readResponseBody(
+          url,
+          response,
+          this.maxResponseBytes,
+          deadlineSignal
+        )
+        this.#validateResponseAuthentication(url, response, body)
+        await this.onDataCallback!(this.#createGeneralResponseMessage(url, response, body))
+      },
+      signal
+    )
   }
 
   private async readResponseBody(

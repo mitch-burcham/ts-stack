@@ -515,10 +515,7 @@ export class Peer {
    * @param {string} [identityKey] - The identity public key of the peer.
    * @returns {Promise<PeerSession>} - A promise that resolves with an authenticated `PeerSession`.
    */
-  async getAuthenticatedSession(
-    identityKey?: string,
-    signal?: AbortSignal
-  ): Promise<PeerSession> {
+  async getAuthenticatedSession(identityKey?: string, signal?: AbortSignal): Promise<PeerSession> {
     if (this.#transport === undefined) {
       throw new Error('Peer transport is not connected!')
     }
@@ -639,10 +636,7 @@ export class Peer {
    * @param {string} [identityKey] - The identity public key of the peer.
    * @returns {Promise<string>} A promise that resolves to the session nonce.
    */
-  private async initiateHandshake(
-    identityKey?: string,
-    signal?: AbortSignal
-  ): Promise<string> {
+  private async initiateHandshake(identityKey?: string, signal?: AbortSignal): Promise<string> {
     throwIfSendAborted(signal)
     if (signal != null) {
       const sessionManager = this.sessionManager as SessionManager & AsyncSessionManager
@@ -702,10 +696,9 @@ export class Peer {
         return responseNonce
       }
 
-       let removeAbortListener = (): void => {}
-       const abort = new Promise<never>((_resolve, reject) => {
-         const onAbort = (): void =>
-           reject(signal.reason ?? new Error('The operation was aborted.'))
+      let removeAbortListener = (): void => {}
+      const abort = new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => reject(signal.reason ?? new Error('The operation was aborted.'))
         signal.addEventListener('abort', onAbort, { once: true })
         removeAbortListener = () => signal.removeEventListener('abort', onAbort)
         if (signal.aborted) onAbort()
@@ -826,6 +819,13 @@ export class Peer {
     if (error instanceof Error) {
       if (peerIdentityKey != null) {
         const existingDetails = (error as any).details
+        const isAuthFetchTimeout =
+          existingDetails != null &&
+          typeof existingDetails === 'object' &&
+          typeof existingDetails.requestId === 'string' &&
+          (existingDetails.dispatchState === 'not-dispatched' ||
+            existingDetails.dispatchState === 'possibly-dispatched')
+        if (isAuthFetchTimeout) throw error
         if (existingDetails != null && typeof existingDetails === 'object') {
           existingDetails.peerIdentityKey ??= peerIdentityKey
         } else {
@@ -1166,11 +1166,7 @@ export class Peer {
         if (signal == null) {
           await callback(identityKey, requestedCertificates as RequestedCertificateSet)
         } else {
-          await callback(
-            identityKey,
-            requestedCertificates as RequestedCertificateSet,
-            signal
-          )
+          await callback(identityKey, requestedCertificates as RequestedCertificateSet, signal)
         }
       }
       return

@@ -214,6 +214,29 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### 2.8.3 candidate — bounded AuthFetch request lifecycle
+
+- Give each authenticated application request one absolute 30-second deadline.
+  Cancel pending-certificate polling and prevent late wallet, session, or
+  certificate work from entering the application transport. The maintained
+  fetch transport forwards cancellation to handshake, application, and plain
+  fallback I/O; custom transports must honor the optional signal before delayed
+  side-effect dispatch and in cancellation-aware I/O.
+- Preserve the exact timeout message and add only non-secret request ID plus
+  conservative `not-dispatched` or `possibly-dispatched` details. Keep the
+  indeterminate state cumulative across stale-session recovery, retain the
+  original deadline for recovery and authenticated-to-plain fallback, and never
+  automatically replay a write after expiry.
+- Atomically coordinate cancelled handshakes with in-progress initial-response
+  work. The default manager prevents stale authentication resurrection; durable
+  stores can implement paired conditional authentication and removal. Legacy or
+  partially upgraded stores remain compatible for non-cancellable Peer flows,
+  while cancellable new-session handshakes fail before row creation or send.
+- Migration: no wire or ordinary caller API migration. Custom transports and
+  certificate-request listeners should honor their optional abort signal.
+  Durable session stores used by cancellable handshakes must implement both
+  atomic methods. Empty-certificate response behavior is unchanged.
+
 ### ATLAS maintained fork — zero-field initial certificate proofs
 
 - Accept BRC-52 zero-field proofs in the `initialResponse` handshake path only
@@ -308,33 +331,6 @@ All notable changes to this project will be documented in this file. The format 
   must retain the new optional local policy fields and coordinate writers.
 - Clarify that certificate callbacks observe committed validation and cannot veto it.
 - Require `accepted: true` from the wallet before accepting BRC-29 settlement.
-
-- Give each AuthFetch authenticated request a private cancellation lifecycle.
-  Cancel pending-certificate polling and prevent late wallet, session, or
-  certificate work from entering the transport. The maintained fetch transport
-  forwards the deadline signal to handshake and application fetches; custom
-  transports must honor the optional signal before delayed side-effect dispatch
-  and in their I/O. Preserve the exact timeout message while adding non-secret
-  request ID and conservative `not-dispatched` or `possibly-dispatched` details.
-  Wallet prompts are not cancelled; late results are ignored. Preserve immediate
-  gateway and wallet-denial errors and never automatically replay a write after
-  its deadline. Keep stale-session retry and authenticated-to-plain fallback on
-  the original absolute deadline, abort fallback I/O when it expires, and carry
-  cancellation through initial-response certificate selection so late wallet
-  approval cannot dispatch disclosure. Coordinate cancellation with in-progress
-  initial-response work
-  and atomically clean up an aborted unauthenticated handshake when the session
-  manager supports paired conditional authentication and removal, without
-  deleting one that completed authentication or allowing a stale cross-replica
-  authentication upsert. Durable async stores may implement the optional atomic
-  pair. Legacy or partially upgraded stores remain compatible for non-cancellable
-  Peer flows, while cancellable new-session handshakes fail before row creation
-  or transport send. Preserve cumulative `possibly-dispatched` state across
-  stale-session recovery attempts.
-  The exact packed browser
-  graph measures 748,809 Vite / 564,990 esbuild / 560,055 UMD raw bytes. The
-  reviewed raw ceilings are 749,000 / 566,000 / 560,500 bytes; compression
-  ceilings remain unchanged.
 
 ### Added
 

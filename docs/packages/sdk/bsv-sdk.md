@@ -3,10 +3,10 @@ id: bsv-sdk
 title: '@bsv/sdk'
 kind: package
 domain: sdk
-version: '2.8.2'
+version: '2.8.3'
 npm: '@bsv/sdk'
-last_updated: '2026-09-23'
-last_verified: '2026-09-23'
+last_updated: '2026-09-28'
+last_verified: '2026-09-28'
 review_cadence_days: 30
 status: stable
 tags: ['sdk', 'crypto', 'transactions']
@@ -14,6 +14,16 @@ repo: 'https://github.com/bsv-blockchain/ts-stack/tree/main/packages/sdk'
 ---
 
 # @bsv/sdk
+
+Version 2.8.3 is a local source candidate that gives each authenticated
+application request one absolute 30-second deadline. It prevents late wallet,
+certificate, and session work from dispatching the request; retains that budget
+through stale-session recovery and authenticated-to-plain fallback; forwards
+cancellation through the maintained HTTP transport; and reports whether an
+application transport may have been entered. Durable session stores used by
+cancellable new-session handshakes must provide the documented paired atomic
+authentication/removal operations. No wire migration is required, and empty
+certificate-response behavior remains unchanged.
 
 Version 2.8.1 repairs portable decryption of authenticated empty
 AES-GCM plaintext. Browser/mobile and native Node envelopes now interoperate

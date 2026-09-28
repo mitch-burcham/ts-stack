@@ -292,7 +292,7 @@ export class AuthFetch {
           const parsedUrl = new URL(url)
           const baseURL = parsedUrl.origin
 
-          peerToUse = await this.#getOrCreatePeer(baseURL)
+          peerToUse = await this.getOrCreatePeer(baseURL)
           if (settled || expireIfDeadlineReached()) return
           if (peerToUse.supportsMutualAuth === false) {
             if (deadline == null) {
@@ -370,19 +370,21 @@ export class AuthFetch {
             if (settled) return
             cleanup(error)
             try {
-              resolve(await this.recoverAuthenticatedSend(
-                error,
-                baseURL,
-                url,
-                config,
-                peerToUse,
-                deadline as number,
-                requestNonceAsBase64,
-                dispatchState,
-                () => {
-                  dispatchState = 'possibly-dispatched'
-                }
-              ))
+              resolve(
+                await this.recoverAuthenticatedSend(
+                  error,
+                  baseURL,
+                  url,
+                  config,
+                  peerToUse,
+                  deadline as number,
+                  requestNonceAsBase64,
+                  dispatchState,
+                  () => {
+                    dispatchState = 'possibly-dispatched'
+                  }
+                )
+              )
             } catch (recoveryError) {
               reject(recoveryError)
             }
@@ -403,7 +405,7 @@ export class AuthFetch {
     return response
   }
 
-  async #getOrCreatePeer(baseURL: string): Promise<AuthPeer> {
+  private async getOrCreatePeer(baseURL: string): Promise<AuthPeer> {
     const existingPeer = this.peers[baseURL]
     if (existingPeer !== undefined) return existingPeer
 
@@ -520,10 +522,7 @@ export class AuthFetch {
     throw error
   }
 
-  private createTimeoutError(
-    requestId: string,
-    dispatchState: AuthFetchDispatchState
-  ): Error {
+  private createTimeoutError(requestId: string, dispatchState: AuthFetchDispatchState): Error {
     const error = new Error('Timed out waiting for authenticated response.')
     ;(error as any).details = { requestId, dispatchState }
     return error
@@ -610,7 +609,7 @@ export class AuthFetch {
     const parsedUrl = new URL(baseUrl)
     const baseURL = parsedUrl.origin
 
-    const peerToUse = await this.#getOrCreatePeer(baseURL)
+    const peerToUse = await this.getOrCreatePeer(baseURL)
 
     // Return a promise that resolves when certificates are received
     const CERTIFICATE_REQUEST_TIMEOUT_MS = 30000

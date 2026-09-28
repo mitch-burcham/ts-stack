@@ -317,9 +317,7 @@ describe('AuthFetch pending-request boundary', () => {
   test('ignores a response callback captured before the request timed out', async () => {
     jest.useFakeTimers()
     try {
-      let capturedListener:
-        | ((senderPublicKey: string, payload: number[]) => void)
-        | undefined
+      let capturedListener: ((senderPublicKey: string, payload: number[]) => void) | undefined
       let sentPayload: number[] | undefined
       const peerState = {
         peer: {

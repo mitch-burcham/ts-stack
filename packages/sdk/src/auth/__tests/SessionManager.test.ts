@@ -188,15 +188,9 @@ describe('SessionManager', () => {
         isAuthenticated: true
       }
 
-      expect(
-        sessionManager.updateSessionIfUnauthenticated(authenticatedSession)
-      ).toBe(true)
-      expect(sessionManager.getSession('testSessionNonce')).toBe(
-        authenticatedSession
-      )
-      expect(
-        sessionManager.updateSessionIfUnauthenticated(validSession)
-      ).toBe(false)
+      expect(sessionManager.updateSessionIfUnauthenticated(authenticatedSession)).toBe(true)
+      expect(sessionManager.getSession('testSessionNonce')).toBe(authenticatedSession)
+      expect(sessionManager.updateSessionIfUnauthenticated(validSession)).toBe(false)
       expect(
         sessionManager.updateSessionIfUnauthenticated({
           ...validSession,
