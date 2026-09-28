@@ -180,7 +180,7 @@ export class Peer {
    *
    * @param {number[]} message - The message payload to send.
    * @param {string} [identityKey] - The identity public key of the peer, or an exact session nonce for a transport response. If not provided, uses the peer from the most recent locally initiated handshake (if any). Inbound messages never select this implicit destination.
-   * @param {AbortSignal} [signal] - Optional internal cancellation signal forwarded to the transport.
+   * @param {AbortSignal} [signal] - Optional cancellation signal checked before dispatch and forwarded to the transport.
    * @param {() => void} [onDispatch] - Optional internal marker invoked immediately before the general-message transport send.
    * @returns {Promise<void>}
    * @throws Will throw an error if the message fails to send.
@@ -513,6 +513,7 @@ export class Peer {
    * v0.1 allowlist validation does not prove complete policy fulfillment.
    *
    * @param {string} [identityKey] - The identity public key of the peer.
+   * @param {AbortSignal} [signal] - Optional cancellation signal for a newly initiated handshake.
    * @returns {Promise<PeerSession>} - A promise that resolves with an authenticated `PeerSession`.
    */
   async getAuthenticatedSession(identityKey?: string, signal?: AbortSignal): Promise<PeerSession> {
@@ -656,36 +657,39 @@ export class Peer {
     const now = Date.now()
     const certificatesRequired = certificatePolicy.certifiers.length > 0
 
-    await this.sessionManager.addSession({
-      isAuthenticated: false,
-      sessionNonce,
-      peerIdentityKey: identityKey,
-      lastUpdate: now,
-      certificatePolicy,
-      certificatesRequired,
-      certificatesValidated: !certificatesRequired
-    })
-    throwIfSendAborted(signal)
-
-    const identityPublicKey = await this.#getIdentityPublicKey()
-
-    const initialRequest: AuthMessage = {
-      version: AUTH_VERSION,
-      messageType: 'initialRequest',
-      identityKey: identityPublicKey,
-      initialNonce: sessionNonce,
-      requestedCertificates: this.#snapshotCertificatePolicy(certificatePolicy)
-    }
-
-    // Register before sending: an in-memory or otherwise synchronous transport
-    // can deliver the response before send() resolves.
-    const initialResponse = this.waitForInitialResponse(sessionNonce, signal)
-    this.#initiatedCertificatePolicies.set(
-      sessionNonce,
-      this.#snapshotCertificatePolicy(certificatePolicy)
-    )
-    if (signal != null) this.initialResponseSignals.set(sessionNonce, signal)
     try {
+      // Cleanup ownership begins before awaiting a durable insert. A store may
+      // commit the row and resolve only after the caller's deadline has fired.
+      await this.sessionManager.addSession({
+        isAuthenticated: false,
+        sessionNonce,
+        peerIdentityKey: identityKey,
+        lastUpdate: now,
+        certificatePolicy,
+        certificatesRequired,
+        certificatesValidated: !certificatesRequired
+      })
+      throwIfSendAborted(signal)
+
+      const identityPublicKey = await this.#getIdentityPublicKey()
+
+      const initialRequest: AuthMessage = {
+        version: AUTH_VERSION,
+        messageType: 'initialRequest',
+        identityKey: identityPublicKey,
+        initialNonce: sessionNonce,
+        requestedCertificates: this.#snapshotCertificatePolicy(certificatePolicy)
+      }
+
+      // Register before sending: an in-memory or otherwise synchronous transport
+      // can deliver the response before send() resolves.
+      const initialResponse = this.waitForInitialResponse(sessionNonce, signal)
+      this.#initiatedCertificatePolicies.set(
+        sessionNonce,
+        this.#snapshotCertificatePolicy(certificatePolicy)
+      )
+      if (signal != null) this.initialResponseSignals.set(sessionNonce, signal)
+
       const send = Promise.resolve().then(async () => {
         throwIfSendAborted(signal)
         await this.#transport.send(snapshotBoundedAuthData(initialRequest), signal)

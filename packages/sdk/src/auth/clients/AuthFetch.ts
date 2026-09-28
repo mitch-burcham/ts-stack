@@ -226,7 +226,7 @@ export class AuthFetch {
    * @throws Will throw an error if unsupported headers are used or other validation fails.
    */
   async fetch(url: string, config: SimplifiedFetchRequestOptions = {}): Promise<Response> {
-    return await this.fetchWithinDeadline(url, config)
+    return await this.fetchWithinDeadline(url, config, Date.now() + AUTH_RESPONSE_TIMEOUT_MS)
   }
 
   private async fetchWithinDeadline(

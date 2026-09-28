@@ -220,6 +220,54 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
+  test('delayed durable session insertion is removed after the request deadline', async () => {
+    jest.useFakeTimers()
+    const addGate = deferred<void>()
+    const cleanupFinished = deferred<void>()
+    const sessionManager = new AsyncTestSessionManager()
+    const addSession = jest
+      .spyOn(sessionManager, 'addSession')
+      .mockImplementation(async session => {
+        await addGate.promise
+        sessionManager.sessions.set(session.sessionNonce as string, { ...session })
+      })
+    const removeSessionIfUnauthenticated = jest
+      .spyOn(sessionManager, 'removeSessionIfUnauthenticated')
+      .mockImplementation(async sessionNonce => {
+        const session = sessionManager.sessions.get(sessionNonce)
+        if (session?.isAuthenticated === false) sessionManager.sessions.delete(sessionNonce)
+        cleanupFinished.resolve(undefined)
+      })
+    const transport: Transport = {
+      async onData(): Promise<void> {},
+      send: jest.fn(async () => {})
+    }
+    const wallet = makeWallet()
+    const peer = new Peer(wallet, transport, undefined, sessionManager)
+    await peer.ready
+    const authFetch = new AuthFetch(wallet, undefined, sessionManager)
+    authFetch.peers[baseUrl] = {
+      peer,
+      supportsMutualAuth: true,
+      pendingCertificateRequests: []
+    }
+
+    const rejection = authFetch.fetch(`${baseUrl}/write`, { method: 'POST' }).catch(error => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(addSession).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sessions.size).toBe(0)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'not-dispatched')
+
+    addGate.resolve(undefined)
+    await cleanupFinished.promise
+    expect(removeSessionIfUnauthenticated).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sessions.size).toBe(0)
+    expect(transport.send).not.toHaveBeenCalled()
+    expect((peer as any).onInitialResponseReceivedCallbacks.size).toBe(0)
+  })
+
   test('initial handshake timeout cleans up while custom send remains pending', async () => {
     jest.useFakeTimers()
     const sendGate = deferred<void>()
@@ -826,6 +874,59 @@ describe('AuthFetch request deadline with real Peer and transport', () => {
 
     fallbackResult.reject(new Error('late fallback failure'))
     await jest.advanceTimersByTimeAsync(0)
+  })
+
+  test('cached plain fallback retains the absolute request deadline', async () => {
+    jest.useFakeTimers()
+    let cachedPlainSignal: AbortSignal | undefined
+    const fetchClient = jest
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('plain response', { status: 200 }))
+      .mockImplementationOnce(async (_input, init) => {
+        cachedPlainSignal = init?.signal ?? undefined
+        return await new Promise<Response>((_resolve, reject) => {
+          cachedPlainSignal?.addEventListener('abort', () => reject(cachedPlainSignal?.reason), {
+            once: true
+          })
+        })
+      })
+    const peerState = {
+      peer: {
+        listenForGeneralMessages: jest.fn(() => 1),
+        stopListeningForGeneralMessages: jest.fn(),
+        toPeer: jest.fn(async () => {
+          throw new Error('HTTP server failed to authenticate')
+        })
+      },
+      identityKey: serverIdentityKey,
+      supportsMutualAuth: undefined as boolean | undefined,
+      pendingCertificateRequests: []
+    }
+    const authFetch = new AuthFetch(
+      makeWallet(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      fetchClient
+    )
+    jest.spyOn(authFetch as any, 'getOrCreatePeer').mockResolvedValue(peerState)
+
+    await expect(authFetch.fetch(`${baseUrl}/plain`)).resolves.toMatchObject({ status: 200 })
+    expect(peerState.supportsMutualAuth).toBe(false)
+    expect(peerState.peer.toPeer).toHaveBeenCalledTimes(1)
+
+    const rejection = authFetch.fetch(`${baseUrl}/plain-later`).catch(error => error)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(fetchClient).toHaveBeenCalledTimes(2)
+    expect(cachedPlainSignal?.aborted).toBe(false)
+
+    await jest.advanceTimersByTimeAsync(30000)
+    expectSafeTimeout(await rejection, 'possibly-dispatched')
+    expect(cachedPlainSignal?.aborted).toBe(true)
+    expect(peerState.peer.toPeer).toHaveBeenCalledTimes(1)
+    expect((authFetch as any).pendingRequestNonces.size).toBe(0)
+    expect(jest.getTimerCount()).toBe(0)
   })
 
   test('classifies a cancellation-ignoring custom transport as possibly dispatched', async () => {
