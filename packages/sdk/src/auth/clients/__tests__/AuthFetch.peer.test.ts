@@ -1,34 +1,67 @@
 import { jest } from '@jest/globals'
 import * as Utils from '../../../primitives/utils.js'
 
+jest.mock('../../Peer.js', () => ({
+  Peer: jest.fn()
+}))
 jest.unstable_mockModule('../../Peer.js', () => ({
   Peer: jest.fn()
 }))
 
+jest.mock('../../transports/SimplifiedFetchTransport.js', () => ({
+  SimplifiedFetchTransport: jest.fn(),
+  DEFAULT_SIMPLIFIED_FETCH_MAX_RESPONSE_BYTES: 16 * 1024 * 1024
+}))
 jest.unstable_mockModule('../../transports/SimplifiedFetchTransport.js', () => ({
   SimplifiedFetchTransport: jest.fn(),
   DEFAULT_SIMPLIFIED_FETCH_MAX_RESPONSE_BYTES: 16 * 1024 * 1024
 }))
 
+jest.mock('../../utils/getVerifiableCertificates.js', () => ({
+  getVerifiableCertificates: jest.fn()
+}))
 jest.unstable_mockModule('../../utils/getVerifiableCertificates.js', () => ({
   getVerifiableCertificates: jest.fn()
 }))
 
+jest.mock('../../../primitives/Random.js', () => ({
+  __esModule: true,
+  default: jest.fn(() => Array.from({ length: 32 }).fill(7))
+}))
 jest.unstable_mockModule('../../../primitives/Random.js', () => ({
   __esModule: true,
   default: jest.fn(() => Array.from({ length: 32 }).fill(7))
 }))
 
-const { AuthFetch } = await import('../AuthFetch.js')
-const { Peer } = await import('../../Peer.js')
-const { SimplifiedFetchTransport } = await import('../../transports/SimplifiedFetchTransport.js')
-const { getVerifiableCertificates } = await import('../../utils/getVerifiableCertificates.js')
+type AuthFetchConstructor = typeof import('../AuthFetch.js').AuthFetch
+type PeerConstructor = typeof import('../../Peer.js').Peer
+type SimplifiedFetchTransportConstructor =
+  typeof import('../../transports/SimplifiedFetchTransport.js').SimplifiedFetchTransport
+type GetVerifiableCertificates =
+  typeof import('../../utils/getVerifiableCertificates.js').getVerifiableCertificates
 
-const PeerMock = Peer as unknown as jest.Mock
-const SimplifiedFetchTransportMock = SimplifiedFetchTransport as unknown as jest.Mock
-const getVerifiableCertificatesMock = getVerifiableCertificates as jest.MockedFunction<
-  typeof getVerifiableCertificates
->
+let AuthFetch!: AuthFetchConstructor
+let Peer!: PeerConstructor
+let SimplifiedFetchTransport!: SimplifiedFetchTransportConstructor
+let PeerMock!: jest.Mock
+let SimplifiedFetchTransportMock!: jest.Mock
+let getVerifiableCertificatesMock!: jest.MockedFunction<GetVerifiableCertificates>
+
+beforeAll(async () => {
+  const [authFetchModule, peerModule, transportModule, certificateModule] = await Promise.all([
+    import('../AuthFetch.js'),
+    import('../../Peer.js'),
+    import('../../transports/SimplifiedFetchTransport.js'),
+    import('../../utils/getVerifiableCertificates.js')
+  ])
+  AuthFetch = authFetchModule.AuthFetch
+  Peer = peerModule.Peer
+  SimplifiedFetchTransport = transportModule.SimplifiedFetchTransport
+  PeerMock = Peer as unknown as jest.Mock
+  SimplifiedFetchTransportMock = SimplifiedFetchTransport as unknown as jest.Mock
+  getVerifiableCertificatesMock =
+    certificateModule.getVerifiableCertificates as jest.MockedFunction<GetVerifiableCertificates>
+})
 
 function deferred<T>(): {
   promise: Promise<T>

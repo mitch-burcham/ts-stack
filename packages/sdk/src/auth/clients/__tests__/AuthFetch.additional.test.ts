@@ -25,14 +25,27 @@ import { Utils, PrivateKey } from '../../../primitives/index.js'
 // Module mock for createNonce (matches what primary test does)
 // ---------------------------------------------------------------------------
 
+jest.mock('../../utils/createNonce.js', () => ({
+  createNonce: jest.fn()
+}))
 jest.unstable_mockModule('../../utils/createNonce.js', () => ({
   createNonce: jest.fn()
 }))
 
-const { AuthFetch } = await import('../AuthFetch.js')
-const { createNonce } = await import('../../utils/createNonce.js')
+type AuthFetchConstructor = typeof import('../AuthFetch.js').AuthFetch
+type CreateNonce = typeof import('../../utils/createNonce.js').createNonce
 
-const createNonceMock = createNonce as jest.MockedFunction<typeof createNonce>
+let AuthFetch!: AuthFetchConstructor
+let createNonceMock!: jest.MockedFunction<CreateNonce>
+
+beforeAll(async () => {
+  const [authFetchModule, createNonceModule] = await Promise.all([
+    import('../AuthFetch.js'),
+    import('../../utils/createNonce.js')
+  ])
+  AuthFetch = authFetchModule.AuthFetch
+  createNonceMock = createNonceModule.createNonce as jest.MockedFunction<CreateNonce>
+})
 
 // ---------------------------------------------------------------------------
 // Helpers
