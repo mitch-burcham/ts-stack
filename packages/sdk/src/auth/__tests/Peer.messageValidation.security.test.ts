@@ -160,7 +160,10 @@ describe('BRC-103 untrusted message validation', () => {
     releaseSigning()
     await sending
 
-    expect(transport.send).toHaveBeenCalledWith(expect.objectContaining({ payload: [1] }))
+    expect(transport.send).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: [1] }),
+      undefined
+    )
   })
 
   test('rejects unsafe local policies and payloads before transport or wallet work', async () => {

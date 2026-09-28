@@ -1060,6 +1060,7 @@ export class Peer {
       lastUpdate: Date.now()
     }
 
+    let sessionForValidation = authenticatedSession
     const coordinatedManager = this.sessionManager as SessionManager & AsyncSessionManager
     const updateSessionIfUnauthenticated = coordinatedManager.updateSessionIfUnauthenticated
     if (
@@ -1071,12 +1072,27 @@ export class Peer {
         authenticatedSession
       )
       if (!updated) {
-        throw new Error(`Peer session is no longer pending for peer: ${message.identityKey}`)
+        const currentSession = await this.sessionManager.getSession(
+          authenticatedSession.sessionNonce as string
+        )
+        if (currentSession?.isAuthenticated !== true) {
+          throw new Error(`Peer session is no longer pending for peer: ${message.identityKey}`)
+        }
+        // A fresh signed initialResponse may revisit a session whose transport
+        // authentication already completed but whose certificate validation
+        // failed. Preserve the committed session and continue the maintained
+        // zero-field policy checks without weakening the cancellation fence.
+        this.#requireMatchingSessionIdentity(
+          currentSession,
+          message.identityKey,
+          message.messageType
+        )
+        sessionForValidation = currentSession
       }
     } else {
       await this.sessionManager.updateSession(authenticatedSession)
     }
-    return { peerSession: authenticatedSession, zeroFieldPolicy }
+    return { peerSession: sessionForValidation, zeroFieldPolicy }
   }
 
   /**

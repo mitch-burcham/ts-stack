@@ -503,9 +503,11 @@ describe('Peer zero-field certificate exchange', () => {
     ).toEqual({ certifiers: [f.master.certifier], types: { [f.master.type]: [] } })
     const second = await secondInitialResponse(f, response, [zero])
     await expect(f.verifierTransport.deliver(second)).rejects.toThrow('A keyring is required')
-    expect(
-      f.verifierPeer.sessionManager.getSession(response.yourNonce ?? '')?.certificatesValidated
-    ).toBe(false)
+    expect(f.verifierPeer.sessionManager.getSession(response.yourNonce ?? '')).toMatchObject({
+      isAuthenticated: true,
+      peerNonce: response.initialNonce,
+      certificatesValidated: false
+    })
     expect(f.certificatesReceived).not.toHaveBeenCalled()
     expect(f.decrypt).not.toHaveBeenCalled()
   })
