@@ -88,9 +88,70 @@ class SerializedSessionStore implements AsyncSessionManager {
   }
 }
 
+// Simulates another replica winning the authentication CAS after this Peer
+// reads the pending row but before it attempts its own transition.
+class AuthenticationCasConflictStore implements AsyncSessionManager {
+  private readonly sessions = new SessionManager()
+
+  constructor(private readonly policyState: 'matching' | 'dropped' | 'changed') {}
+
+  private copy(session: PeerSession): PeerSession {
+    return JSON.parse(JSON.stringify(session))
+  }
+
+  async addSession(session: PeerSession): Promise<void> {
+    this.sessions.addSession(this.copy(session))
+  }
+
+  async updateSession(session: PeerSession): Promise<void> {
+    this.sessions.updateSession(this.copy(session))
+  }
+
+  async updateSessionIfUnauthenticated(session: PeerSession): Promise<boolean> {
+    const competingSession = this.copy(session)
+    if (this.policyState === 'dropped') {
+      delete competingSession.certificatePolicy
+    } else if (this.policyState === 'changed' && competingSession.certificatePolicy != null) {
+      competingSession.certificatePolicy = {
+        certifiers: [...competingSession.certificatePolicy.certifiers],
+        types: Object.fromEntries(
+          Object.keys(competingSession.certificatePolicy.types).map(type => [type, ['name']])
+        )
+      }
+    }
+    this.sessions.updateSession(competingSession)
+    return false
+  }
+
+  async getSession(identifier: string): Promise<PeerSession | undefined> {
+    const session = this.sessions.getSession(identifier)
+    return session === undefined ? undefined : this.copy(session)
+  }
+
+  async removeSession(session: PeerSession): Promise<void> {
+    this.sessions.removeSession(session)
+  }
+
+  async removeSessionIfUnauthenticated(sessionNonce: string): Promise<void> {
+    this.sessions.removeSessionIfUnauthenticated(sessionNonce)
+  }
+
+  async hasSession(identifier: string): Promise<boolean> {
+    return this.sessions.hasSession(identifier)
+  }
+
+  async claimMessageNonce(sessionNonce: string, messageNonce: string): Promise<boolean> {
+    return this.sessions.claimMessageNonce(sessionNonce, messageNonce)
+  }
+
+  async claimInitialRequestNonce(identityKey: string, initialNonce: string): Promise<boolean> {
+    return this.sessions.claimInitialRequestNonce(identityKey, initialNonce)
+  }
+}
+
 async function peers(
   fields: string[] = [],
-  store: 'sync' | 'async' | 'legacy' = 'sync',
+  store: 'sync' | 'async' | 'legacy' | 'cas-matching' | 'cas-dropped' | 'cas-changed' = 'sync',
   requireCertificates = true
 ) {
   const issuer = new CompletedProtoWallet(new PrivateKey(81))
@@ -130,11 +191,18 @@ async function peers(
   })
   const verifierTransport = new QueuedTransport()
   const holderTransport = new QueuedTransport()
+  const verifierSessionManager = store.startsWith('cas-')
+    ? new AuthenticationCasConflictStore(
+        store.slice('cas-'.length) as 'matching' | 'dropped' | 'changed'
+      )
+    : store === 'sync'
+      ? undefined
+      : new SerializedSessionStore(store === 'legacy')
   const verifierPeer = new Peer(
     verifier,
     verifierTransport,
     requireCertificates ? requested : undefined,
-    store === 'sync' ? undefined : new SerializedSessionStore(store === 'legacy')
+    verifierSessionManager
   )
   const holderPeer = new Peer(holderWallet, holderTransport)
   await Promise.all([verifierPeer.ready, holderPeer.ready])
@@ -227,6 +295,40 @@ describe('Peer zero-field certificate exchange', () => {
     expect(f.certificatesReceived).toHaveBeenCalledTimes(1)
     expect(f.decrypt).not.toHaveBeenCalled()
   })
+
+  it('keeps zero-field authority when the authenticated CAS winner persisted the same policy', async () => {
+    const f = await peers([], 'cas-matching')
+    const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    await f.holderTransport.deliver(await f.verifierTransport.next())
+    const response = await f.holderTransport.next()
+    expect(response.certificates?.[0].keyring).toEqual({})
+
+    await f.verifierTransport.deliver(response)
+
+    await expect(handshake).resolves.toMatchObject({
+      isAuthenticated: true,
+      certificatesValidated: true,
+      peerIdentityKey: f.holderIdentity
+    })
+    expect(f.certificatesReceived).toHaveBeenCalledTimes(1)
+    expect(f.decrypt).not.toHaveBeenCalled()
+  })
+
+  it.each(['dropped', 'changed'] as const)(
+    'revokes zero-field authority when the authenticated CAS winner has a %s policy',
+    async policyState => {
+      const f = await peers([], `cas-${policyState}`)
+      void f.verifierPeer.getAuthenticatedSession(f.holderIdentity).catch(() => {})
+      await f.holderTransport.deliver(await f.verifierTransport.next())
+      const response = await f.holderTransport.next()
+      expect(response.certificates?.[0].keyring).toEqual({})
+
+      await expect(f.verifierTransport.deliver(response)).rejects.toThrow('A keyring is required')
+
+      expect(f.certificatesReceived).not.toHaveBeenCalled()
+      expect(f.decrypt).not.toHaveBeenCalled()
+    }
+  )
 
   it('does not let transport mutation alias the locally retained field request', async () => {
     const f = await peers(['name'])

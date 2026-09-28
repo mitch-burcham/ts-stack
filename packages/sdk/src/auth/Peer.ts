@@ -35,6 +35,26 @@ function throwIfSendAborted(signal?: AbortSignal): void {
   }
 }
 
+function certificatePoliciesMatch(
+  stored: RequestedCertificateSet,
+  sent: RequestedCertificateSet
+): boolean {
+  const canonical = (policy: RequestedCertificateSet): string => {
+    assertRequestedCertificateSet(policy)
+    return JSON.stringify([
+      [...policy.certifiers].sort(),
+      Object.keys(policy.types)
+        .sort()
+        .map(type => [type, [...policy.types[type]].sort()])
+    ])
+  }
+  try {
+    return canonical(stored) === canonical(sent)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Represents a peer capable of performing mutual authentication.
  * Manages sessions, handles authentication handshakes, certificate requests and responses,
@@ -1043,7 +1063,7 @@ export class Peer {
 
     // Taken before the refill below, which a store that lost the snapshot must never turn
     // into zero-field authority.
-    const zeroFieldPolicy = this.#takeZeroFieldPolicy(peerSession)
+    let zeroFieldPolicy = this.#takeZeroFieldPolicy(peerSession)
 
     peerSession.certificatePolicy ??= this.#snapshotCertificatePolicy(this.certificatesToRequest)
     const certificatesRequired = peerSession.certificatePolicy.certifiers.length > 0
@@ -1087,7 +1107,21 @@ export class Peer {
           message.identityKey,
           message.messageType
         )
-        sessionForValidation = currentSession
+        if (
+          zeroFieldPolicy == null ||
+          currentSession.certificatePolicy == null ||
+          !certificatePoliciesMatch(currentSession.certificatePolicy, zeroFieldPolicy)
+        ) {
+          zeroFieldPolicy = undefined
+        }
+        sessionForValidation = {
+          ...currentSession,
+          // The persisted winner cannot downgrade the certificate requirement
+          // of the initial request currently being authenticated.
+          certificatesRequired:
+            currentSession.certificatesRequired === true ||
+            authenticatedSession.certificatesRequired
+        }
       }
     } else {
       await this.sessionManager.updateSession(authenticatedSession)
@@ -1107,20 +1141,7 @@ export class Peer {
     this.#initiatedCertificatePolicies.delete(sessionNonce)
     const stored = peerSession.certificatePolicy
     if (sent == null || stored == null) return undefined
-    const canonical = (policy: RequestedCertificateSet): string => {
-      const snapshot = this.#snapshotCertificatePolicy(policy)
-      return JSON.stringify([
-        [...snapshot.certifiers].sort(),
-        Object.keys(snapshot.types)
-          .sort()
-          .map(type => [type, [...snapshot.types[type]].sort()])
-      ])
-    }
-    try {
-      return canonical(stored) === canonical(sent) ? sent : undefined
-    } catch {
-      return undefined
-    }
+    return certificatePoliciesMatch(stored, sent) ? sent : undefined
   }
 
   private async validateInitialResponseCertificates(
