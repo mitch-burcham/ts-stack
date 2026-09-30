@@ -254,6 +254,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('authenticates a signed metadata-only core in a real initial response and sends a general message', async () => {
     const f = await peers()
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     await f.holderTransport.deliver(await f.verifierTransport.next())
     const response = await f.holderTransport.next()
     expect(response.messageType).toBe('initialResponse')
@@ -285,6 +286,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('uses an independent snapshot when the configured request changes in flight', async () => {
     const f = await peers()
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     const request = await f.verifierTransport.next()
     // The live, public configuration is mutated in flight. The constructor already
     // copied the caller's object, so mutating that copy's source would exercise nothing.
@@ -300,6 +302,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('keeps zero-field authority when the authenticated CAS winner persisted the same policy', async () => {
     const f = await peers([], 'cas-matching')
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     await f.holderTransport.deliver(await f.verifierTransport.next())
     const response = await f.holderTransport.next()
     expect(response.certificates?.[0].keyring).toEqual({})
@@ -354,6 +357,7 @@ describe('Peer zero-field certificate exchange', () => {
       types: { [f.master.type]: ['name'] }
     }))
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     const request = await f.verifierTransport.next()
     // Custom serialization added to the live configuration after the request left
     // must not reach validation: the retained handshake snapshot is what is validated.
@@ -380,6 +384,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('preserves the request snapshot through an asynchronous serialized session store', async () => {
     const f = await peers([], 'async')
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     await f.holderTransport.deliver(await f.verifierTransport.next())
     await f.verifierTransport.deliver(await f.holderTransport.next())
     await expect(handshake).resolves.toMatchObject({
@@ -501,6 +506,7 @@ describe('Peer zero-field certificate exchange', () => {
     async senderAuthority => {
       const f = await peers()
       const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+      void handshake.catch(() => {})
       await f.holderTransport.deliver(await f.verifierTransport.next())
       await f.verifierTransport.deliver(await f.holderTransport.next())
       await handshake
@@ -540,6 +546,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('preserves the existing nonempty standalone certificate response path', async () => {
     const f = await peers()
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     await f.holderTransport.deliver(await f.verifierTransport.next())
     await f.verifierTransport.deliver(await f.holderTransport.next())
     await handshake
@@ -560,6 +567,7 @@ describe('Peer zero-field certificate exchange', () => {
   it('in-flight mutation of the live peer.certificatesToRequest does not change the handshake snapshot', async () => {
     const f = await peers()
     const handshake = f.verifierPeer.getAuthenticatedSession(f.holderIdentity)
+    void handshake.catch(() => {})
     const request = await f.verifierTransport.next()
     f.verifierPeer.certificatesToRequest.certifiers.length = 0
     f.verifierPeer.certificatesToRequest.types[f.master.type].push('name')
