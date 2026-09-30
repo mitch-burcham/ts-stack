@@ -1118,6 +1118,78 @@ describe('SimplifiedFetchTransport ordering behind an empty certificateResponse'
     ])
   })
 
+  test('a message sent after the first empty answer is decided still waits for the second', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(emptyAnswer())
+    await transport.send(emptyAnswer())
+    answer(0, refused())
+    await flush()
+    await transport.send(certificateRequest())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateResponse:session-a'])
+
+    answer(1, refused())
+    await flush()
+    expect(dispatched).toHaveLength(3)
+    expect(dispatched[2]).toBe('certificateRequest:session-a')
+  })
+
+  test('cancelling a held empty answer neither releases the session early nor holds it forever', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+    const controller = new AbortController()
+
+    await transport.send(emptyAnswer())
+    await transport.send(emptyAnswer(), controller.signal)
+    controller.abort(new Error('caller gave up'))
+    await flush()
+    await transport.send(certificateRequest())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a'])
+
+    answer(0, refused())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateRequest:session-a'])
+  })
+
+  test('the hold ends when the server answers, not when the client has handled the answer', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    let finishHandling!: () => void
+    const handling = new Promise<void>(resolve => {
+      finishHandling = resolve
+    })
+    await transport.onData(async () => await handling)
+
+    await transport.send(emptyAnswer())
+    await transport.send(certificateRequest())
+    answer(
+      0,
+      new Response(JSON.stringify(makeAuthMessage('certificateResponse', { certificates: [] })), {
+        status: 200
+      })
+    )
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateRequest:session-a'])
+    finishHandling()
+    await flush()
+  })
+
+  test('messages without a session nonce are never held', async () => {
+    const { fetchClient, dispatched } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(makeAuthMessage('certificateResponse', { certificates: [] }))
+    await transport.send(makeAuthMessage('certificateRequest', { requestedCertificates: policy }))
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:undefined', 'certificateRequest:undefined'])
+  })
+
   test('a failed empty answer releases the session', async () => {
     const { fetchClient, dispatched, answer } = controlledFetch()
     const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)

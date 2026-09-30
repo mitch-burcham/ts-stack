@@ -31,6 +31,8 @@ const MAX_REQUEST_METHOD_BYTES = 32
 const MAX_REQUEST_TARGET_COMPONENT_BYTES = 8192
 const MAX_AUTH_REQUEST_PAYLOAD_BYTES = 16 * 1024 * 1024
 
+function releaseNothing(): void {}
+
 async function settledUnlessAborted(prior: Promise<void>, signal: AbortSignal): Promise<void> {
   const abortError = (): unknown => signal.reason ?? new Error('The operation was aborted.')
   if (signal.aborted) throw abortError()
@@ -152,7 +154,7 @@ export class SimplifiedFetchTransport implements Transport {
 
   async #sendAuthMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {
     // Taken synchronously, so a message sent after an empty certificateResponse is held behind it.
-    const { prior, release } = this.#orderBehindEmptyCertificateResponses(message)
+    const { prior, release = releaseNothing } = this.#orderBehindEmptyCertificateResponses(message)
     return await new Promise((resolve, reject) => {
       void (async () => {
         try {
@@ -165,7 +167,7 @@ export class SimplifiedFetchTransport implements Transport {
               try {
                 response = await this.#fetchAuthMessage(url, message, deadlineSignal)
               } finally {
-                release?.()
+                release()
               }
               if (!response.ok) {
                 const body = await this.readResponseBody(
@@ -198,7 +200,7 @@ export class SimplifiedFetchTransport implements Transport {
           reject(error)
         } finally {
           // Covers an exchange that never reached fetch (deadline or cancellation first).
-          release?.()
+          release()
         }
       })()
     })
@@ -217,7 +219,7 @@ export class SimplifiedFetchTransport implements Transport {
     release?: () => void
   } {
     const session = message.initialNonce
-    if (message.messageType === 'initialRequest' || typeof session !== 'string') return {}
+    if (typeof session !== 'string') return {}
     const prior = this.#emptyCertificateResponses.get(session)
     if (
       message.messageType !== 'certificateResponse' ||
@@ -230,7 +232,9 @@ export class SimplifiedFetchTransport implements Transport {
     const exchange = new Promise<void>(resolve => {
       release = resolve
     })
-    const pending = prior == null ? exchange : Promise.all([prior, exchange]).then(() => {})
+    // Includes every earlier empty answer, so releasing this one (even by cancellation before
+    // its own fetch) never releases the session ahead of them.
+    const pending = Promise.all([prior, exchange]).then(() => {})
     this.#emptyCertificateResponses.set(session, pending)
     void pending.then(() => {
       if (this.#emptyCertificateResponses.get(session) === pending) {
