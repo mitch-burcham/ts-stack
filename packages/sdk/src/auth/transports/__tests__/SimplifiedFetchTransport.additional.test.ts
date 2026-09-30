@@ -1031,3 +1031,152 @@ describe('BRC-104 response body-length wire encoding', () => {
     expect(await receive(response(404, [1, 2, 3]))).toEqual([0xfd, 0x94, 0x01, 0, 3, 1, 2, 3])
   })
 })
+
+// ─── ordering behind an empty certificateResponse ────────────────────────────
+
+describe('SimplifiedFetchTransport ordering behind an empty certificateResponse', () => {
+  // A server routes a session's /.well-known/auth messages by the client's session nonce
+  // (initialNonce), so two of them open at once collide. An empty certificateResponse is
+  // answered promptly, so later messages of the same session wait for its HTTP exchange.
+  const policy = { certifiers: [], types: {} }
+  const emptyAnswer = (session = 'session-a'): AuthMessage =>
+    makeAuthMessage('certificateResponse', { initialNonce: session, certificates: [] })
+  const certificateRequest = (session = 'session-a'): AuthMessage =>
+    makeAuthMessage('certificateRequest', { initialNonce: session, requestedCertificates: policy })
+
+  // Every exchange is answered by the end of its test, so no transport deadline outlives it.
+  const unanswered = new Set<(response: Response | Error) => void>()
+  afterEach(async () => {
+    for (const reply of unanswered) reply(new Response('{"status":"error"}', { status: 400 }))
+    await flush()
+  })
+
+  function controlledFetch(): {
+    fetchClient: typeof fetch
+    dispatched: string[]
+    answer: (index: number, response: Response | Error) => void
+  } {
+    const dispatched: string[] = []
+    const replies: Array<(response: Response | Error) => void> = []
+    const fetchClient = jest.fn(async (_url: string, init: RequestInit) => {
+      const message = JSON.parse(String(init.body)) as AuthMessage
+      dispatched.push(`${message.messageType}:${String(message.initialNonce)}`)
+      return await new Promise<Response>((resolve, reject) => {
+        const reply = (response: Response | Error): void => {
+          unanswered.delete(reply)
+          if (response instanceof Error) reject(response)
+          else resolve(response)
+        }
+        unanswered.add(reply)
+        replies.push(reply)
+      })
+    }) as unknown as typeof fetch
+    return { fetchClient, dispatched, answer: (index, response) => replies[index](response) }
+  }
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve))
+  }
+  const refused = (): Response => new Response('{"status":"error"}', { status: 400 })
+
+  test('a later certificateRequest of the session is dispatched only after the empty answer is answered', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(emptyAnswer())
+    await transport.send(certificateRequest())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a'])
+
+    answer(0, refused())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateRequest:session-a'])
+  })
+
+  test('a second empty answer waits for the first, and a later message waits for both', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(emptyAnswer())
+    await transport.send(emptyAnswer())
+    await transport.send(certificateRequest())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a'])
+
+    answer(0, refused())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateResponse:session-a'])
+
+    answer(1, refused())
+    await flush()
+    expect(dispatched).toEqual([
+      'certificateResponse:session-a',
+      'certificateResponse:session-a',
+      'certificateRequest:session-a'
+    ])
+  })
+
+  test('a failed empty answer releases the session', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(emptyAnswer())
+    await transport.send(
+      makeAuthMessage('certificateResponse', {
+        initialNonce: 'session-a',
+        certificates: [{ serialNumber: 'populated' } as any]
+      })
+    )
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a'])
+
+    answer(0, new TypeError('network down'))
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateResponse:session-a'])
+  })
+
+  test('a populated answer and another session are not held back', async () => {
+    const { fetchClient, dispatched } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+
+    await transport.send(
+      makeAuthMessage('certificateResponse', {
+        initialNonce: 'session-a',
+        certificates: [{ serialNumber: 'populated' } as any]
+      })
+    )
+    await transport.send(certificateRequest())
+    await transport.send(emptyAnswer('session-b'))
+    await transport.send(certificateRequest('session-c'))
+    await flush()
+    expect(dispatched).toEqual([
+      'certificateResponse:session-a',
+      'certificateRequest:session-a',
+      'certificateResponse:session-b',
+      'certificateRequest:session-c'
+    ])
+  })
+
+  test('cancelling a held message while it waits means it is never dispatched', async () => {
+    const { fetchClient, dispatched, answer } = controlledFetch()
+    const transport = new SimplifiedFetchTransport('https://api.example.com', fetchClient)
+    await transport.onData(async () => {})
+    const controller = new AbortController()
+
+    await transport.send(emptyAnswer())
+    await transport.send(certificateRequest(), controller.signal)
+    controller.abort(new Error('caller gave up'))
+    await flush()
+    answer(0, refused())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a'])
+
+    await transport.send(certificateRequest())
+    await flush()
+    expect(dispatched).toEqual(['certificateResponse:session-a', 'certificateRequest:session-a'])
+  })
+})

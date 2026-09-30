@@ -31,6 +31,21 @@ const MAX_REQUEST_METHOD_BYTES = 32
 const MAX_REQUEST_TARGET_COMPONENT_BYTES = 8192
 const MAX_AUTH_REQUEST_PAYLOAD_BYTES = 16 * 1024 * 1024
 
+async function settledUnlessAborted(prior: Promise<void>, signal: AbortSignal): Promise<void> {
+  const abortError = (): unknown => signal.reason ?? new Error('The operation was aborted.')
+  if (signal.aborted) throw abortError()
+  let onAbort: (() => void) | undefined
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    await Promise.race([prior, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort as () => void)
+  }
+}
+
 export interface SimplifiedFetchTransportOptions {
   /** Maximum buffered authenticated application-response body size. */
   maxResponseBytes?: number
@@ -54,6 +69,8 @@ export class SimplifiedFetchTransport implements Transport {
   private readonly maxResponseBytes: number
   readonly #maxHandshakeResponseBytes: number
   readonly #requestTimeoutMs: number
+  // Per session nonce: settles when every empty certificateResponse sent so far has its HTTP response.
+  readonly #emptyCertificateResponses = new Map<string, Promise<void>>()
 
   /**
    * Constructs a new instance of SimplifiedFetchTransport.
@@ -134,6 +151,8 @@ export class SimplifiedFetchTransport implements Transport {
   }
 
   async #sendAuthMessage(message: AuthMessage, signal?: AbortSignal): Promise<void> {
+    // Taken synchronously, so a message sent after an empty certificateResponse is held behind it.
+    const { prior, release } = this.#orderBehindEmptyCertificateResponses(message)
     return await new Promise((resolve, reject) => {
       void (async () => {
         try {
@@ -141,7 +160,13 @@ export class SimplifiedFetchTransport implements Transport {
           const responseWork = this.#withDeadline(
             url,
             async deadlineSignal => {
-              const response = await this.#fetchAuthMessage(url, message, deadlineSignal)
+              if (prior != null) await settledUnlessAborted(prior, deadlineSignal)
+              let response: Response
+              try {
+                response = await this.#fetchAuthMessage(url, message, deadlineSignal)
+              } finally {
+                release?.()
+              }
               if (!response.ok) {
                 const body = await this.readResponseBody(
                   url,
@@ -171,9 +196,48 @@ export class SimplifiedFetchTransport implements Transport {
           if (message.messageType === 'initialRequest') resolve()
         } catch (error) {
           reject(error)
+        } finally {
+          // Covers an exchange that never reached fetch (deadline or cancellation first).
+          release?.()
         }
       })()
     })
+  }
+
+  /**
+   * A server routes a session's `/.well-known/auth` messages by the client's session nonce
+   * (`initialNonce`), so two of them open at once collide: one is refused as a duplicate, or
+   * the server answers on the wrong response. An empty certificateResponse is answered at
+   * once (refused, or decided by the server's own policy), so later messages of its session
+   * wait until its HTTP response arrives. A populated one is answered only after the server
+   * application decides, so it is not waited for, as before.
+   */
+  #orderBehindEmptyCertificateResponses(message: AuthMessage): {
+    prior?: Promise<void>
+    release?: () => void
+  } {
+    const session = message.initialNonce
+    if (message.messageType === 'initialRequest' || typeof session !== 'string') return {}
+    const prior = this.#emptyCertificateResponses.get(session)
+    if (
+      message.messageType !== 'certificateResponse' ||
+      !Array.isArray(message.certificates) ||
+      message.certificates.length > 0
+    ) {
+      return { prior }
+    }
+    let release!: () => void
+    const exchange = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const pending = prior == null ? exchange : Promise.all([prior, exchange]).then(() => {})
+    this.#emptyCertificateResponses.set(session, pending)
+    void pending.then(() => {
+      if (this.#emptyCertificateResponses.get(session) === pending) {
+        this.#emptyCertificateResponses.delete(session)
+      }
+    })
+    return { prior, release }
   }
 
   #encodeRequestBody(body: number[], contentType: string): string | Uint8Array {
