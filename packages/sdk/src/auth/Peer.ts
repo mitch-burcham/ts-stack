@@ -24,6 +24,9 @@ import {
 
 const AUTH_VERSION = '0.1'
 const INITIAL_RESPONSE_TIMEOUT_MS = 30_000
+// Upper bound on how long a general message waits for this Peer's own answer to a certificate
+// request embedded in an initialResponse; after it the message is sent and the peer decides.
+const INITIAL_CERTIFICATE_ANSWER_WAIT_MS = 30_000
 const BufferCtor = typeof globalThis === 'undefined' ? undefined : (globalThis as any).Buffer
 
 function throwIfSendAborted(signal?: AbortSignal): void {
@@ -114,7 +117,10 @@ export class Peer {
   // initiateHandshake awaits the response, and the first authenticated initialResponse consumes it.
   readonly #initiatedCertificatePolicies = new Map<string, RequestedCertificateSet>()
 
-  private readonly initialResponseTasks: Map<string, Set<Promise<void>>> = new Map()
+  private readonly initialResponseTasks: Map<string, Set<Promise<unknown>>> = new Map()
+  // Per session nonce: settles when the automatic answer to a certificate request embedded in
+  // that session's initialResponse has been sent, or has failed, been declined or cancelled.
+  readonly #initialCertificateAnswers = new Map<string, Promise<void>>()
   private readonly cancelledInitialResponseSessions: Set<string> = new Set()
   private readonly initialResponseSignals: Map<string, AbortSignal> = new Map()
 
@@ -223,6 +229,8 @@ export class Peer {
 
     const peerSession = await this.getAuthenticatedSession(identityKey, signal)
     throwIfSendAborted(signal)
+    await this.#afterInitialCertificateAnswer(peerSession.sessionNonce as string, signal)
+    throwIfSendAborted(signal)
 
     if (peerSession.peerIdentityKey == null) {
       throw new Error('Peer identity is not established')
@@ -270,6 +278,74 @@ export class Peer {
     } catch (error: unknown) {
       this.propagateTransportError(peerSession.peerIdentityKey, error)
     }
+  }
+
+  /**
+   * A peer that asked for certificates in its initialResponse may refuse a general message that
+   * arrives before our answer (atlas-relay does, with no queue), and the handshake releases its
+   * waiters before that answer is sent. Hold general messages of the session until the answer
+   * has been sent or has ended without one, bounded, and cancellable by the caller's signal.
+   */
+  async #afterInitialCertificateAnswer(sessionNonce: string, signal?: AbortSignal): Promise<void> {
+    const answer = this.#initialCertificateAnswers.get(sessionNonce)
+    if (answer == null) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    try {
+      await Promise.race([
+        answer,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, INITIAL_CERTIFICATE_ANSWER_WAIT_MS)
+          if (typeof timer === 'object' && 'unref' in timer) timer.unref()
+        }),
+        new Promise<never>((_resolve, reject) => {
+          if (signal == null) return
+          onAbort = () => reject(signal.reason ?? new Error('The operation was aborted.'))
+          signal.addEventListener('abort', onAbort, { once: true })
+          if (signal.aborted) onAbort()
+        })
+      ])
+    } finally {
+      clearTimeout(timer)
+      if (onAbort != null) signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /**
+   * Registers the hold for this Peer's answer to a certificate request embedded in a verified
+   * initialResponse. Called before the session is written as authenticated, so any caller that
+   * can see the authenticated session also finds the hold. Released when the automatic answer
+   * has been sent or has ended without one, or just before application listeners run: they may
+   * themselves send on the session, and they own their ordering.
+   */
+  #holdForInitialCertificateAnswer(
+    sessionNonce: string,
+    message: AuthMessage
+  ): (() => void) | undefined {
+    if (!Peer.#requestsCertificates(message)) return undefined
+    let release!: () => void
+    const answered = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const prior = this.#initialCertificateAnswers.get(sessionNonce)
+    const pending = Promise.all([prior, answered]).then(() => {})
+    this.#initialCertificateAnswers.set(sessionNonce, pending)
+    void pending.then(() => {
+      if (this.#initialCertificateAnswers.get(sessionNonce) === pending) {
+        this.#initialCertificateAnswers.delete(sessionNonce)
+      }
+    })
+    return release
+  }
+
+  static #requestsCertificates(
+    message: AuthMessage
+  ): message is AuthMessage & { requestedCertificates: RequestedCertificateSet } {
+    return (
+      message.requestedCertificates != null &&
+      Array.isArray(message.requestedCertificates.certifiers) &&
+      message.requestedCertificates.certifiers.length > 0
+    )
   }
 
   async #touchSession(sessionNonce: string): Promise<void> {
@@ -1022,9 +1098,11 @@ export class Peer {
    * @param {AuthMessage} message - The incoming initial response message.
    * @throws Will throw an error if nonce or signature verification fails.
    */
-  private async authenticateInitialResponse(
-    message: AuthMessage
-  ): Promise<{ peerSession: PeerSession; zeroFieldPolicy?: RequestedCertificateSet }> {
+  private async authenticateInitialResponse(message: AuthMessage): Promise<{
+    peerSession: PeerSession
+    zeroFieldPolicy?: RequestedCertificateSet
+    releaseHold?: () => void
+  }> {
     const validNonce = await verifyNonce(
       message.yourNonce as string,
       this.#wallet,
@@ -1079,6 +1157,30 @@ export class Peer {
       message.messageType
     )
 
+    // Verified and claimed, and nothing below has yet made the session observable as
+    // authenticated: toPeer finds an authenticated session through the store, so the hold must
+    // exist before the write. Every failure from here on releases it.
+    const releaseHold = this.#holdForInitialCertificateAnswer(
+      peerSession.sessionNonce as string,
+      message
+    )
+    try {
+      return await this.#commitAuthenticatedInitialResponse(message, peerSession, releaseHold)
+    } catch (error) {
+      releaseHold?.()
+      throw error
+    }
+  }
+
+  async #commitAuthenticatedInitialResponse(
+    message: AuthMessage,
+    peerSession: PeerSession,
+    releaseHold: (() => void) | undefined
+  ): Promise<{
+    peerSession: PeerSession
+    zeroFieldPolicy?: RequestedCertificateSet
+    releaseHold?: () => void
+  }> {
     // Taken before the refill below, which a store that lost the snapshot must never turn
     // into zero-field authority.
     let zeroFieldPolicy = this.#takeZeroFieldPolicy(peerSession)
@@ -1144,7 +1246,7 @@ export class Peer {
     } else {
       await this.sessionManager.updateSession(authenticatedSession)
     }
-    return { peerSession: sessionForValidation, zeroFieldPolicy }
+    return { peerSession: sessionForValidation, zeroFieldPolicy, releaseHold }
   }
 
   /**
@@ -1209,18 +1311,15 @@ export class Peer {
 
   async #answerInitialCertificateRequest(
     message: AuthMessage,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    releaseHold?: () => void
   ): Promise<void> {
     const { requestedCertificates, identityKey } = message
-    if (
-      message.requestedCertificates == null ||
-      !Array.isArray(message.requestedCertificates.certifiers) ||
-      message.requestedCertificates.certifiers.length === 0
-    ) {
-      return
-    }
+    if (!Peer.#requestsCertificates(message)) return
     throwIfSendAborted(signal)
     if (this.onCertificateRequestReceivedCallbacks.size > 0) {
+      // Application listeners run outside the hold: they may send on this session themselves.
+      releaseHold?.()
       for (const callback of this.onCertificateRequestReceivedCallbacks.values()) {
         if (signal == null) {
           await callback(identityKey, requestedCertificates as RequestedCertificateSet)
@@ -1262,8 +1361,9 @@ export class Peer {
       this.initialResponseTasks.set(sessionNonce, tasks)
     }
     tasks.add(task)
+    let releaseHold: (() => void) | undefined
     try {
-      await task
+      releaseHold = await task
     } finally {
       tasks.delete(task)
       if (tasks.size === 0) {
@@ -1271,22 +1371,39 @@ export class Peer {
       }
     }
     try {
-      await this.#answerInitialCertificateRequest(message, signal)
+      await this.#answerInitialCertificateRequest(message, signal, releaseHold)
     } finally {
       this.initialResponseSignals.delete(sessionNonce)
+      // Sent, failed, declined or cancelled: the held general messages go out either way.
+      releaseHold?.()
     }
   }
 
   async #processUntrackedInitialResponse(message: AuthMessage): Promise<void> {
-    await this.#processInitialResponseAuthentication(message)
-    await this.#answerInitialCertificateRequest(message)
+    const releaseHold = await this.#processInitialResponseAuthentication(message)
+    try {
+      await this.#answerInitialCertificateRequest(message, undefined, releaseHold)
+    } finally {
+      releaseHold?.()
+    }
   }
 
-  async #processInitialResponseAuthentication(message: AuthMessage): Promise<void> {
-    const { peerSession, zeroFieldPolicy } = await this.authenticateInitialResponse(message)
-    await this.validateInitialResponseCertificates(message, peerSession, zeroFieldPolicy)
-    this.lastInteractedWithPeer = message.identityKey
-    this.#releaseInitialResponseWaiters(peerSession)
+  async #processInitialResponseAuthentication(
+    message: AuthMessage
+  ): Promise<(() => void) | undefined> {
+    // The hold, if any, was taken before the session became observable as authenticated.
+    const { peerSession, zeroFieldPolicy, releaseHold } =
+      await this.authenticateInitialResponse(message)
+    try {
+      await this.validateInitialResponseCertificates(message, peerSession, zeroFieldPolicy)
+      this.lastInteractedWithPeer = message.identityKey
+      this.#releaseInitialResponseWaiters(peerSession)
+    } catch (error) {
+      // No answer will follow a failed validation; held messages go out for the peer to decide.
+      releaseHold?.()
+      throw error
+    }
+    return releaseHold
   }
 
   /**
