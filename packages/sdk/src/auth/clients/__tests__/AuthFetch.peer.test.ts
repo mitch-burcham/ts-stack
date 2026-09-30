@@ -258,10 +258,78 @@ describe('AuthFetch authenticated peer lifecycle', () => {
     )
     expect(sendCertificateResponse).toHaveBeenCalledWith('server-identity-key', [certificateToSend])
 
+    // Holding none of the requested certificates is an answer too: the server can decide now
+    // instead of at its own certificate deadline.
     getVerifiableCertificatesMock.mockResolvedValue([])
     await certificatesRequested?.('server-identity-key', requestedCertificates)
-    expect(sendCertificateResponse).toHaveBeenCalledTimes(1)
+    expect(sendCertificateResponse).toHaveBeenCalledTimes(2)
+    expect(sendCertificateResponse).toHaveBeenLastCalledWith('server-identity-key', [])
     expect(authFetch.peers['https://service.example'].pendingCertificateRequests).toEqual([])
+  })
+
+  test('answers a handshake certificate request it cannot satisfy with an empty list under the handshake signal', async () => {
+    let certificatesRequested:
+      | ((
+          verifier: string,
+          requestedCertificates: Record<string, unknown>,
+          signal?: AbortSignal
+        ) => Promise<void>)
+      | undefined
+    const peer = {
+      ready: Promise.resolve(),
+      listenForCertificatesReceived: jest.fn(),
+      listenForCertificatesRequested: jest.fn((listener: typeof certificatesRequested) => {
+        certificatesRequested = listener
+      }),
+      sendCertificateResponse: jest.fn(async () => {})
+    }
+    PeerMock.mockImplementation(() => peer)
+    getVerifiableCertificatesMock.mockResolvedValue([])
+    const authFetch = new AuthFetch({} as any)
+    jest.spyOn(authFetch as any, 'wait').mockResolvedValue(undefined)
+    const peerState = await (authFetch as any).getOrCreatePeer('https://service.example')
+    const signal = new AbortController().signal
+
+    await certificatesRequested?.(
+      'server-identity-key',
+      { certifiers: ['certifier'], types: { identity: ['name'] } },
+      signal
+    )
+
+    expect(peer.sendCertificateResponse).toHaveBeenCalledTimes(1)
+    expect(peer.sendCertificateResponse).toHaveBeenCalledWith('server-identity-key', [], signal)
+    expect(peerState.pendingCertificateRequests).toEqual([])
+  })
+
+  test('a wallet failure while collecting certificates sends nothing and propagates', async () => {
+    let certificatesRequested:
+      | ((verifier: string, requestedCertificates: Record<string, unknown>) => Promise<void>)
+      | undefined
+    const peer = {
+      ready: Promise.resolve(),
+      listenForCertificatesReceived: jest.fn(),
+      listenForCertificatesRequested: jest.fn((listener: typeof certificatesRequested) => {
+        certificatesRequested = listener
+      }),
+      sendCertificateResponse: jest.fn(async () => {})
+    }
+    PeerMock.mockImplementation(() => peer)
+    const failure = new Error('wallet unavailable')
+    getVerifiableCertificatesMock.mockRejectedValue(failure)
+    const authFetch = new AuthFetch({} as any)
+    jest.spyOn(authFetch as any, 'wait').mockResolvedValue(undefined)
+    const peerState = await (authFetch as any).getOrCreatePeer('https://service.example')
+
+    await expect(
+      certificatesRequested?.('server-identity-key', {
+        certifiers: ['certifier'],
+        types: { identity: ['name'] }
+      })
+    ).rejects.toBe(failure)
+
+    // A failure (or a declined disclosure) is not "I hold no certificate".
+    expect(peer.sendCertificateResponse).not.toHaveBeenCalled()
+    expect(peerState.pendingCertificateRequests).toEqual([])
   })
 
   test('waits for pending certificate decisions before sending', async () => {

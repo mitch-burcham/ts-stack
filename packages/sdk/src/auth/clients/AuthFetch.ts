@@ -443,12 +443,13 @@ export class AuthFetch {
           this.originator
         )
         if (signal?.aborted === true) return
-        if (certificatesToInclude.length > 0) {
-          if (signal == null) {
-            await newPeer.sendCertificateResponse(verifier, certificatesToInclude)
-          } else {
-            await newPeer.sendCertificateResponse(verifier, certificatesToInclude, signal)
-          }
+        // Answer even when nothing matches: an empty list validates nothing, but it lets a
+        // certificate-gated server decide now instead of at its own certificate deadline.
+        // A wallet error or declined disclosure throws above and sends nothing.
+        if (signal == null) {
+          await newPeer.sendCertificateResponse(verifier, certificatesToInclude)
+        } else {
+          await newPeer.sendCertificateResponse(verifier, certificatesToInclude, signal)
         }
       } finally {
         // Give the backend 500 ms to process the certificates we just sent, before releasing the queue entry.

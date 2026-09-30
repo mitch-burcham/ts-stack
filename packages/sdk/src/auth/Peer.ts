@@ -1237,11 +1237,12 @@ export class Peer {
       this.#originator
     )
     throwIfSendAborted(signal)
-    // An empty response has no value and can race with a subsequent request
-    // that shares the same initial nonce.
-    if (verifiableCertificates.length > 0) {
-      await this.sendCertificateResponse(identityKey, verifiableCertificates, signal)
-    }
+    // Answer even when nothing matches, as processCertificateRequest does: an empty list
+    // validates nothing, but lets a certificate-gated peer decide now instead of at its own
+    // timeout. A wallet error or declined disclosure throws above and sends nothing. Over
+    // HTTP the empty answer shares its routing key (our session nonce) with later messages
+    // of this session; SimplifiedFetchTransport holds those until it has been answered.
+    await this.sendCertificateResponse(identityKey, verifiableCertificates, signal)
   }
 
   async #processInitialResponse(message: AuthMessage): Promise<void> {
