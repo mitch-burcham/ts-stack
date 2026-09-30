@@ -416,6 +416,17 @@ no answer. Over HTTP, `SimplifiedFetchTransport` holds a session's later
 `/.well-known/auth` messages until the empty answer has its response, because
 servers route those messages by the client's session nonce.
 
+When a verified `initialResponse` requests certificates, `Peer` holds every
+`toPeer` general message on that session, from any caller. The hold is taken
+before the session is recorded as authenticated. It lasts until the Peer's own
+answer, empty or populated, has been sent or has ended without one: a wallet
+error, a declined disclosure, a send failure, cancellation, or failed
+validation of the peer's certificates. If an application certificate-request
+listener handles the request, the hold ends just before the listener runs, and
+the listener orders its own sends. A held message is sent after at most 30
+seconds regardless, and the caller's abort signal cancels it unsent. Some
+servers refuse general messages until that answer arrives.
+
 An `initialRequest` is unsigned, and the v0.1 `initialResponse` signature binds
 the nonce pair and identity but not its `requestedCertificates` or
 `certificates` members. Built-in wallet proving encrypts revealed field keys to

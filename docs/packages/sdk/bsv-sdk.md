@@ -24,8 +24,18 @@ decide at once instead of at its own certificate deadline. An empty list
 validates nothing, and a wallet error or declined disclosure still sends
 nothing. `SimplifiedFetchTransport` holds a session's later
 `/.well-known/auth` messages until that empty answer has its HTTP response,
-because servers route them by the client's session nonce. No API or wire
-migration is required.
+because servers route them by the client's session nonce.
+
+When a verified `initialResponse` requests certificates, `Peer` holds every
+`toPeer` general message on that session, from any caller and on every
+transport. The hold is taken before the session is recorded as authenticated.
+It lasts until the Peer's own answer, empty or populated, has been sent or has
+ended without one: a wallet error, a declined disclosure, a send failure,
+cancellation, or failed validation of the peer's certificates. If an
+application certificate-request listener handles the request, the hold ends
+just before the listener runs, and the listener orders its own sends. A held
+message is sent after at most 30 seconds regardless, and the caller's abort
+signal cancels it unsent. No API or wire migration is required.
 
 Version 2.8.3 is a local source candidate that gives each authenticated
 application request one absolute 30-second deadline. It prevents late wallet,

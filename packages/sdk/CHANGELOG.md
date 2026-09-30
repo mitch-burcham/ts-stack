@@ -236,10 +236,28 @@ Version not yet assigned; builds on the 2.8.3 candidate below.
   overlapping message would be refused as a duplicate, or answered on the wrong
   response by older middleware. That overlap is why 2.0.4 stopped sending empty
   responses.
+- When a verified `initialResponse` requests certificates, `Peer` holds every
+  `toPeer` general message on that session, from any caller. The hold is taken
+  before the session is recorded as authenticated. It lasts until the Peer's
+  own answer, empty or populated, has been sent or has ended without one:
+  - a wallet error;
+  - a declined disclosure;
+  - a send failure;
+  - cancellation;
+  - failed validation of the peer's certificates.
+
+  If an application certificate-request listener handles the request, the hold
+  ends just before the listener runs, and the listener orders its own sends. A
+  held message is sent after at most 30 seconds regardless, and the caller's
+  abort signal cancels it unsent. Previously the handshake resolved before the
+  answer, so callers such as `AuthSocketClient.emit` could send first. A server
+  that refuses general messages while its certificate request is outstanding
+  then refused them.
 - Migration: no API or wire-format change. Certificate-requesting servers
   receive one additional signed `certificateResponse` per certificate-less
   handshake; `auth-express-middleware` logs `No certificates provided by peer`
-  for it.
+  for it. General messages sent while that answer is pending can be delayed
+  by the wallet's certificate lookup and disclosure time, up to 30 seconds.
 
 ### 2.8.3 candidate — bounded AuthFetch request lifecycle
 
