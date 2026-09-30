@@ -214,6 +214,33 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Next candidate — answer certificate requests the client cannot satisfy
+
+Version not yet assigned; builds on the 2.8.3 candidate below.
+
+- When a server asks for certificates in its `initialResponse` and the wallet
+  holds none of them, `AuthFetch` and the default `Peer` now send an
+  authenticated `certificateResponse` with an empty list instead of nothing.
+  Previously the server learned nothing until its own certificate deadline
+  (30 seconds by default) and refused by timeout, even where its policy admits
+  the identity without a certificate. `Peer` already answered a standalone
+  `certificateRequest` this way.
+- An empty list validates nothing: `certificatesValidated` stays false, and
+  `auth-express-middleware` answers it 400 `ERR_CERTIFICATES_REQUIRED` before
+  any approval. Only a server whose own authorizer admits certificate-less
+  identities can accept it. A wallet error or declined disclosure still
+  propagates and sends nothing. Populated responses are unchanged.
+- `SimplifiedFetchTransport` holds a session's later `/.well-known/auth`
+  messages until each empty `certificateResponse` of that session has its HTTP
+  response. Servers route those messages by the client's session nonce, so an
+  overlapping message would be refused as a duplicate, or answered on the wrong
+  response by older middleware. That overlap is why 2.0.4 stopped sending empty
+  responses.
+- Migration: no API or wire-format change. Certificate-requesting servers
+  receive one additional signed `certificateResponse` per certificate-less
+  handshake; `auth-express-middleware` logs `No certificates provided by peer`
+  for it.
+
 ### 2.8.3 candidate — bounded AuthFetch request lifecycle
 
 - Give each authenticated application request one absolute 30-second deadline.
@@ -235,7 +262,8 @@ All notable changes to this project will be documented in this file. The format 
 - Migration: no wire or ordinary caller API migration. Custom transports and
   certificate-request listeners should honor their optional abort signal.
   Durable session stores used by cancellable handshakes must implement both
-  atomic methods. Empty-certificate response behavior is unchanged.
+  atomic methods. This entry leaves empty-certificate response behavior
+  unchanged; the next-candidate entry above changes it.
 
 ### ATLAS maintained fork — zero-field initial certificate proofs
 

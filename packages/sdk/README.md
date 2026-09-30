@@ -407,6 +407,15 @@ successful dynamic response consumes one matching request; failed validation
 keeps it available for retry. Request the intended set explicitly instead of
 relying on unrequested certificates.
 
+When a peer requests certificates and the wallet holds none that match,
+`AuthFetch` and the default `Peer` answer with an authenticated
+`certificateResponse` containing an empty list, so the requester can decide
+now instead of at its own timeout. An empty list validates nothing and cannot
+satisfy a certificate requirement. A wallet error or declined disclosure sends
+no answer. Over HTTP, `SimplifiedFetchTransport` holds a session's later
+`/.well-known/auth` messages until the empty answer has its response, because
+servers route those messages by the client's session nonce.
+
 An `initialRequest` is unsigned, and the v0.1 `initialResponse` signature binds
 the nonce pair and identity but not its `requestedCertificates` or
 `certificates` members. Built-in wallet proving encrypts revealed field keys to

@@ -5,8 +5,8 @@ kind: package
 domain: sdk
 version: '2.8.3'
 npm: '@bsv/sdk'
-last_updated: '2026-09-28'
-last_verified: '2026-09-28'
+last_updated: '2026-09-30'
+last_verified: '2026-09-30'
 review_cadence_days: 30
 status: stable
 tags: ['sdk', 'crypto', 'transactions']
@@ -15,6 +15,18 @@ repo: 'https://github.com/bsv-blockchain/ts-stack/tree/main/packages/sdk'
 
 # @bsv/sdk
 
+The next source candidate, with its version not yet assigned, builds on 2.8.3
+and answers certificate requests the client cannot satisfy. When a server asks
+for certificates in its `initialResponse` and the wallet holds none of them,
+`AuthFetch` and the default `Peer` send an authenticated `certificateResponse`
+with an empty list instead of nothing. A certificate-gated server can then
+decide at once instead of at its own certificate deadline. An empty list
+validates nothing, and a wallet error or declined disclosure still sends
+nothing. `SimplifiedFetchTransport` holds a session's later
+`/.well-known/auth` messages until that empty answer has its HTTP response,
+because servers route them by the client's session nonce. No API or wire
+migration is required.
+
 Version 2.8.3 is a local source candidate that gives each authenticated
 application request one absolute 30-second deadline. It prevents late wallet,
 certificate, and session work from dispatching the request; retains that budget
@@ -22,8 +34,8 @@ through stale-session recovery and authenticated-to-plain fallback; forwards
 cancellation through the maintained HTTP transport; and reports whether an
 application transport may have been entered. Durable session stores used by
 cancellable new-session handshakes must provide the documented paired atomic
-authentication/removal operations. No wire migration is required, and empty
-certificate-response behavior remains unchanged.
+authentication/removal operations. No wire migration is required. 2.8.3 itself
+leaves empty certificate-response behavior unchanged.
 
 Version 2.8.1 repairs portable decryption of authenticated empty
 AES-GCM plaintext. Browser/mobile and native Node envelopes now interoperate
